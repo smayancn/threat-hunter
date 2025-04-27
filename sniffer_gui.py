@@ -1,1626 +1,2282 @@
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, messagebox, scrolledtext
 import threading
+import time
 import os
 import sys
-import pandas as pd
+import queue
+import re
+import random
 from datetime import datetime
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import subprocess
 import csv
-import time
 
-# Import the sniffer functionality
-from sniffer import get_windows_if_list, capture_network_details, get_next_available_filename
+# Try importing matplotlib for visualization
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    has_matplotlib = True
+except ImportError:
+    has_matplotlib = False
 
-# Add ThreadedSniffer class
-class ThreadedSniffer(threading.Thread):
-    """Thread class for running packet capture in the background"""
-    def __init__(self, interface, output_file, callback=None, capture_time=30):
-        threading.Thread.__init__(self)
-        self.interface = interface
-        self.output_file = os.path.abspath(output_file)  # Ensure we have absolute path
-        self.callback = callback
-        self.capture_time = capture_time
-        self.daemon = True  # Thread will exit when main program exits
-        
-    def run(self):
-        """Main execution method for the thread"""
-        try:
-            # Pass a positive integer for capture duration
-            capture_duration = self.capture_time if self.capture_time is not None else 3600  # Use 1 hour as default
+# Try importing Scapy at the module level with better error handling
+try:
+    import scapy.all as scapy
+    from scapy.all import sniff, wrpcap, Ether, IP, TCP, UDP, ICMP, ARP, DNS, Raw, conf
+    
+    # Try to import get_windows_if_list, but provide a fallback if it's not available
+    try:
+        from scapy.all import get_windows_if_list
+    except ImportError:
+        print("get_windows_if_list not available in scapy.all, using custom implementation")
+        # Custom implementation for get_windows_if_list if not available in Scapy
+        def get_windows_if_list():
+            """Custom implementation of get_windows_if_list for Windows"""
+            import subprocess
+            import re
+            import json
             
-            # Wait until previous file operations complete
-            time.sleep(0.5)
-            
-            # Ensure output directory exists
-            output_dir = os.path.dirname(self.output_file)
-            if output_dir and not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-            
-            print(f"Starting capture to file: {self.output_file}")
-            
-            # Call the capture function
-            result = capture_network_details(self.interface, capture_duration)
-            
-            # Handle the result correctly
-            if result:
-                csv_path, _ = result if isinstance(result, tuple) else (result, None)
+            # Use Windows CLI to get available interfaces
+            try:
+                # Use netsh to get interface information
+                netsh_output = subprocess.check_output(
+                    "netsh interface ip show interfaces",
+                    shell=True, 
+                    universal_newlines=True
+                )
                 
-                # Print detailed outcome for debugging
-                print(f"Capture completed. CSV file: {csv_path}")
+                # Parse netsh output to extract interface information
+                interfaces = []
+                lines = netsh_output.strip().split('\n')
+                headers = [h.strip() for h in lines[0].split() if h.strip()]
                 
-                if self.callback:
-                    # Make sure we're passing the absolute path to the callback
-                    abs_path = os.path.abspath(csv_path)
-                    self.callback(f"Capture completed: {abs_path}")
-            else:
-                # If capture returns None but our output file exists, use that instead
-                if os.path.exists(self.output_file):
-                    print(f"Capture function returned None, but output file exists: {self.output_file}")
-                    if self.callback:
-                        self.callback(f"Capture completed: {self.output_file}")
-                else:
-                    # No file was created
-                    print("Capture failed: No results returned and no output file exists")
-                    if self.callback:
-                        self.callback("Capture failed: No results returned")
+                for line in lines[2:]:  # Skip header and separator
+                    if not line.strip():
+                        continue
+                    
+                    # Extract interface name (usually the last part)
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        name = ' '.join(parts[3:])  # Interface name is usually after the first 3 fields
+                        idx = parts[0]  # First field is usually the index
+                        
+                        # Get the IP address for this interface using ipconfig
+                        ip_addresses = []
+                        try:
+                            ipconfig = subprocess.check_output(
+                                f"ipconfig /all", 
+                                shell=True, 
+                                universal_newlines=True
+                            )
+                            
+                            # Find section for this interface and extract IP
+                            sections = ipconfig.split('\n\n')
+                            for section in sections:
+                                if name in section:
+                                    ip_match = re.search(r'IPv4 Address[^:]*:\s*([0-9.]+)', section)
+                                    if ip_match:
+                                        ip_addresses.append(ip_match.group(1))
+                        except:
+                            pass
+                        
+                        # Create interface info
+                        iface = {
+                            'name': name,
+                            'description': name,
+                            'win_index': idx,
+                            'guid': f"Interface_{idx}",  # Use index as a fake GUID
+                            'ips': ip_addresses
+                        }
+                        interfaces.append(iface)
                 
-        except Exception as e:
-            print(f"Error in ThreadedSniffer: {str(e)}")
-            if self.callback:
-                self.callback(f"Error in capture: {str(e)}")
+                return interfaces
+            except Exception as e:
+                print(f"Error getting Windows interfaces: {e}")
+                # Return at least a minimal localhost interface
+                return [{'name': 'Local Interface', 'description': 'Localhost', 'win_index': '1', 'guid': '{00000000-0000-0000-0000-000000000000}', 'ips': ['127.0.0.1']}]
+    
+    HAS_SCAPY = True
+    print("Successfully imported Scapy at module level")
+except ImportError as e:
+    print(f"ImportError when importing Scapy: {str(e)}")
+    HAS_SCAPY = False
+    print("WARNING: Failed to import Scapy. Installing scapy with 'pip install scapy' may be required for capture.")
+except Exception as e:
+    print(f"Unexpected error when importing Scapy: {str(e)}")
+    HAS_SCAPY = False
+    print("WARNING: Failed to import Scapy due to an unexpected error. This may be a permissions issue.")
+
+# Import sniffer functionality
+import sniffer
 
 class SnifferGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Network Threat Hunter")
+        self.root.title("Network Sniffer")
         self.root.geometry("1200x800")
         self.root.minsize(800, 600)
         
-        # Interface and capture variables
-        self.interface_var = tk.StringVar()
-        self.capture_time_var = tk.StringVar(value="30")
-        self.is_capturing = False
+        # Debug mode for troubleshooting
+        self.debug_mode = True  # Set to True to see debug info
+        
+        self.capture_in_progress = False
         self.capture_thread = None
-        self.current_csv = None
+        self.stats = None
+        self.csv_file = None
+        self.all_packets = []  # Initialize the list for storing all packets
         
-        # Real-time capture is now default
-        self.realtime_var = tk.BooleanVar(value=True)
-        self.passive_var = tk.BooleanVar(value=False)
+        # Theme settings
+        self.current_theme = "light"
+        self.themes = {
+            "light": {
+                "bg": "#f0f0f0",
+                "fg": "#000000",
+                "text_bg": "#ffffff",
+                "text_fg": "#000000",
+                "highlight_bg": "#e0e0e0",
+                "highlight_fg": "#000000",
+                "button_bg": "#e0e0e0",
+                "button_fg": "#000000",
+                "header_bg": "#d0d0d0",
+                "header_fg": "#000000"
+            },
+            "dark": {
+                "bg": "#000000",
+                "fg": "#ffffff",
+                "text_bg": "#000000",
+                "text_fg": "#ffffff",
+                "highlight_bg": "#333333",
+                "highlight_fg": "#ffffff",
+                "button_bg": "#000000",
+                "button_fg": "#ffffff",
+                "header_bg": "#000000",
+                "header_fg": "#ffffff"
+            }
+        }
         
-        # Create main frame
-        main_frame = ttk.Frame(root)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        # Protocol colors for Wireshark-like color coding
+        self.protocol_colors = {
+            "TCP": {"light": "#e7e6ff", "dark": "#000066"},
+            "UDP": {"light": "#e7ffff", "dark": "#006666"},
+            "ICMP": {"light": "#ffe0e0", "dark": "#660000"},
+            "ARP": {"light": "#e6ffca", "dark": "#336600"},
+            "DNS": {"light": "#e6e0ff", "dark": "#330066"},
+            "HTTP": {"light": "#ffe0cc", "dark": "#663300"},
+            "HTTPS": {"light": "#ffd9cc", "dark": "#662200"},
+            "TLS": {"light": "#ccffe6", "dark": "#006633"},
+            "SSH": {"light": "#ffe6cc", "dark": "#663300"},
+            "FTP": {"light": "#ffe6f2", "dark": "#660033"},
+            "DHCP": {"light": "#e6f2ff", "dark": "#003366"},
+            "SMB": {"light": "#f2e6ff", "dark": "#330066"},
+            "NTP": {"light": "#fff2e6", "dark": "#663300"},
+            "SNMP": {"light": "#e6fff2", "dark": "#006633"}
+        }
         
-        # Create header with app title
-        header_frame = ttk.Frame(main_frame)
-        header_frame.pack(fill=tk.X, pady=(0, 15))
+        # Create the main framework
+        self._create_menu()
+        self._create_toolbar()
+        self._create_main_content()
+        self._create_statusbar()
         
-        ttk.Label(header_frame, text="Network Threat Hunter", 
-                 font=("Segoe UI", 18, "bold")).pack(side=tk.LEFT)
+        # Initialize interfaces list
+        self._load_interfaces()
         
-        # Create upper frame for controls
-        control_frame = ttk.LabelFrame(main_frame, text="Capture Controls")
-        control_frame.pack(fill=tk.X, pady=10, padx=5, ipadx=10, ipady=10)
+        # Apply the default theme
+        self._apply_theme()
+    
+    def init_default_stats(self):
+        """Initialize default statistics"""
+        self.stats = {
+            "protocol_counts": {"TCP": 0, "UDP": 0, "ICMP": 0, "DNS": 0, "HTTP": 0, "ARP": 0, "Other": 0},
+            "total_packets": 0,
+            "total_bytes": 0,
+            "start_time": time.time(),
+            "end_time": time.time(),
+            "duration": 0,
+            "packet_rate": 0,
+            "byte_rate": 0,
+            "top_ips": {},
+            "top_destinations": {},
+            "top_ports": {}
+        }
+    
+    def _create_menu(self):
+        """Create the menu bar"""
+        menubar = tk.Menu(self.root)
         
-        # Interface selection with better layout
-        interface_frame = ttk.Frame(control_frame)
-        interface_frame.pack(fill=tk.X, pady=(10, 5), padx=10)
+        # File menu
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Open Capture File...", command=self._open_capture)
+        file_menu.add_command(label="Save Capture As...", command=self._save_capture)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.root.quit)
+        menubar.add_cascade(label="File", menu=file_menu)
         
-        ttk.Label(interface_frame, text="Network Interface:", 
-                 font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 10))
+        # Capture menu
+        capture_menu = tk.Menu(menubar, tearoff=0)
+        capture_menu.add_command(label="Start", command=self.start_capture)
+        capture_menu.add_command(label="Stop", command=self.stop_capture)
+        menubar.add_cascade(label="Capture", menu=capture_menu)
         
-        self.interface_combo = ttk.Combobox(interface_frame, textvariable=self.interface_var, width=50)
-        self.interface_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        # Help menu
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="About", command=self._show_about)
+        menubar.add_cascade(label="Help", menu=help_menu)
         
-        refresh_button = ttk.Button(interface_frame, text="Refresh", command=self.refresh_interfaces)
-        refresh_button.pack(side=tk.LEFT, padx=5)
+        self.root.config(menu=menubar)
+    
+    def _create_toolbar(self):
+        """Create the toolbar with common actions"""
+        toolbar_frame = ttk.Frame(self.root)
+        toolbar_frame.pack(side=tk.TOP, fill=tk.X)
+        
+        # Interface selection
+        ttk.Label(toolbar_frame, text="Interface:").pack(side=tk.LEFT, padx=5, pady=5)
+        self.interface_var = tk.StringVar()
+        self.interface_dropdown = ttk.Combobox(toolbar_frame, textvariable=self.interface_var, width=40)
+        self.interface_dropdown.pack(side=tk.LEFT, padx=5, pady=5)
         
         # Capture mode selection
-        mode_frame = ttk.Frame(control_frame)
-        mode_frame.pack(fill=tk.X, pady=5, padx=10)
+        self.capture_mode = tk.StringVar(value="time")
+        ttk.Radiobutton(toolbar_frame, text="Time:", variable=self.capture_mode, value="time").pack(side=tk.LEFT, padx=5, pady=5)
         
-        ttk.Label(mode_frame, text="Capture Mode:", 
-                 font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 10))
-                 
-        # Add radio buttons for capture mode
-        realtime_radio = ttk.Radiobutton(mode_frame, text="Real-time Capture", 
-                                        variable=self.realtime_var, value=True,
-                                        command=self.toggle_capture_mode)
-        realtime_radio.pack(side=tk.LEFT, padx=5)
+        # Time entry
+        self.time_var = tk.StringVar(value="30")
+        time_entry = ttk.Entry(toolbar_frame, textvariable=self.time_var, width=5)
+        time_entry.pack(side=tk.LEFT, padx=0, pady=5)
+        ttk.Label(toolbar_frame, text="seconds").pack(side=tk.LEFT, padx=5, pady=5)
         
-        passive_radio = ttk.Radiobutton(mode_frame, text="Passive Capture", 
-                                       variable=self.realtime_var, value=False,
-                                       command=self.toggle_capture_mode)
-        passive_radio.pack(side=tk.LEFT, padx=5)
+        # Packet count option
+        ttk.Radiobutton(toolbar_frame, text="Packets:", variable=self.capture_mode, value="packets").pack(side=tk.LEFT, padx=5, pady=5)
         
-        # Capture time with better layout
-        time_frame = ttk.Frame(control_frame)
-        time_frame.pack(fill=tk.X, pady=10, padx=10)
+        # Packet count entry
+        self.packets_var = tk.StringVar(value="100")
+        packets_entry = ttk.Entry(toolbar_frame, textvariable=self.packets_var, width=5)
+        packets_entry.pack(side=tk.LEFT, padx=0, pady=5)
         
-        ttk.Label(time_frame, text="Capture Duration (seconds):", 
-                 font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 10))
+        # Start/Stop buttons
+        self.start_button = ttk.Button(toolbar_frame, text="Start Capture", command=self.start_capture)
+        self.start_button.pack(side=tk.LEFT, padx=20, pady=5)
         
-        # Default capture time entry should be disabled because real-time is default
-        self.capture_time_entry = ttk.Entry(time_frame, textvariable=self.capture_time_var, width=10, state='disabled')
-        self.capture_time_entry.pack(side=tk.LEFT, padx=5)
+        self.stop_button = ttk.Button(toolbar_frame, text="Stop", command=self.stop_capture, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT, padx=5, pady=5)
         
-        # Capture control buttons - WITH FILE MANAGEMENT
-        button_frame = ttk.Frame(control_frame)
-        button_frame.pack(pady=10, padx=10, fill=tk.X)
+        # Theme toggle button
+        self.theme_var = tk.StringVar(value="Dark Mode")
+        self.theme_button = ttk.Button(toolbar_frame, textvariable=self.theme_var, command=self.toggle_theme)
+        self.theme_button.pack(side=tk.RIGHT, padx=10, pady=5)
         
-        # Create capture button frame on the left
-        capture_btn_frame = ttk.Frame(button_frame)
-        capture_btn_frame.pack(side=tk.LEFT, fill=tk.Y)
+        # Create a second toolbar for filters
+        filter_frame = ttk.Frame(self.root)
+        filter_frame.pack(side=tk.TOP, fill=tk.X)
         
-        self.start_button = ttk.Button(capture_btn_frame, text="Start Real-time Capture", command=self.start_capture, width=20)
-        self.start_button.pack(side=tk.LEFT, padx=5)
+        # Filter options
+        ttk.Label(filter_frame, text="Filter:").pack(side=tk.LEFT, padx=5, pady=5)
         
-        # Add a separate button for passive capture
-        passive_capture_btn = ttk.Button(capture_btn_frame, text="Start Passive Capture", 
-                                       command=self.start_passive_capture, width=20)
-        passive_capture_btn.pack(side=tk.LEFT, padx=5)
+        # Protocol filter
+        ttk.Label(filter_frame, text="Protocol:").pack(side=tk.LEFT, padx=5, pady=5)
+        self.protocol_filter = ttk.Combobox(filter_frame, values=["All", "TCP", "UDP", "ICMP", "ARP", "Other"], width=10)
+        self.protocol_filter.current(0)
+        self.protocol_filter.pack(side=tk.LEFT, padx=5, pady=5)
         
-        self.stop_button = ttk.Button(capture_btn_frame, text="Stop Capture", command=self.stop_capture, state=tk.DISABLED, width=15)
-        self.stop_button.pack(side=tk.LEFT, padx=5)
+        # IP filter
+        ttk.Label(filter_frame, text="IP:").pack(side=tk.LEFT, padx=5, pady=5)
+        self.ip_filter = ttk.Entry(filter_frame, width=15)
+        self.ip_filter.pack(side=tk.LEFT, padx=5, pady=5)
         
-        # Create CSV file management sections in the control frame
-        file_buttons_frame = ttk.Frame(button_frame)
-        file_buttons_frame.pack(side=tk.RIGHT, fill=tk.Y)
+        # Port filter
+        ttk.Label(filter_frame, text="Port:").pack(side=tk.LEFT, padx=5, pady=5)
+        self.port_filter = ttk.Entry(filter_frame, width=5)
+        self.port_filter.pack(side=tk.LEFT, padx=5, pady=5)
         
-        # CSV file management buttons - moved next to capture controls
-        ttk.Button(file_buttons_frame, text="Open CSV", 
-                  command=self.open_csv, width=12).pack(side=tk.LEFT, padx=5)
+        # Apply filter button
+        self.filter_button = ttk.Button(filter_frame, text="Apply Filter", command=self._apply_filters)
+        self.filter_button.pack(side=tk.LEFT, padx=5, pady=5)
         
-        ttk.Button(file_buttons_frame, text="Export", 
-                  command=self.export_results, width=10).pack(side=tk.LEFT, padx=5)
+        # Clear filter button
+        self.clear_filter_button = ttk.Button(filter_frame, text="Clear Filter", command=self._clear_filters)
+        self.clear_filter_button.pack(side=tk.LEFT, padx=5, pady=5)
+    
+    def _create_main_content(self):
+        """Create the main content area with tabs"""
+        main_frame = ttk.Frame(self.root)
+        main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
-        ttk.Button(file_buttons_frame, text="View Files", 
-                  command=self.list_all_captures, width=12).pack(side=tk.LEFT, padx=5)
-        
-        ttk.Button(file_buttons_frame, text="Load External", 
-                  command=self.load_external_csv, width=12).pack(side=tk.LEFT, padx=5)
-        
-        ttk.Button(file_buttons_frame, text="Open Directory", 
-                  command=self.open_csv_directory, width=12).pack(side=tk.LEFT, padx=5)
-        
-        # Create tabs for different views
+        # Create notebook (tabbed interface)
         self.notebook = ttk.Notebook(main_frame)
-        self.notebook.pack(fill=tk.BOTH, expand=True, pady=10)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Live capture tab
-        self.live_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.live_tab, text="Live Capture")
+        # Packets tab
+        self.packets_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.packets_frame, text="Packets")
         
-        # Create header frame for title and controls
-        live_header_frame = ttk.Frame(self.live_tab, padding=5)
-        live_header_frame.pack(fill=tk.X)
+        # Create a frame for the packet list
+        packet_list_frame = ttk.Frame(self.packets_frame)
+        packet_list_frame.pack(fill=tk.BOTH, expand=True)
         
-        ttk.Label(live_header_frame, text="Live Network Packet Capture", 
-                 font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, padx=5)
-                 
-        # Create packet counter display
-        self.packet_counter_var = tk.StringVar(value="Packets: 0")
-        ttk.Label(live_header_frame, textvariable=self.packet_counter_var,
-                font=("Segoe UI", 10)).pack(side=tk.RIGHT, padx=10)
-        
-        # Create live display frame
-        live_frame = ttk.Frame(self.live_tab, padding=10)
-        live_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Create text widget with a better monospace font for packet display
-        self.live_text = scrolledtext.ScrolledText(
-            live_frame, 
-            wrap=tk.WORD, 
-            background="white", 
-            foreground="black",
-            font=("Consolas", 10)  # Use monospace font
+        # Column headers - removed icmp_type, icmp_code, dns_query, http_method, http_host, http_path
+        columns = (
+            "no", "timestamp", "src_mac", "dst_mac", "src_ip", "dst_ip", 
+            "src_port", "dst_port", "protocol", "length", "ttl", 
+            "tcp_flags", "tcp_window", "packet_direction", "info"
         )
-        self.live_text.pack(fill=tk.BOTH, expand=True)
+        self.packet_tree = ttk.Treeview(packet_list_frame, columns=columns, show="headings")
         
-        # Add a header to the live capture
-        header_text = "=== Network Packet Capture ===\n"
-        header_text += "Timestamp | Protocol | Source → Destination | Info\n"
-        header_text += "-----------------------------------------------------\n"
-        self.live_text.insert(tk.END, header_text, "header")
+        # Define column headings
+        self.packet_tree.heading("no", text="#")
+        self.packet_tree.heading("timestamp", text="Time")
+        self.packet_tree.heading("src_mac", text="Source MAC")
+        self.packet_tree.heading("dst_mac", text="Destination MAC")
+        self.packet_tree.heading("src_ip", text="Source IP")
+        self.packet_tree.heading("dst_ip", text="Destination IP")
+        self.packet_tree.heading("src_port", text="Source Port")
+        self.packet_tree.heading("dst_port", text="Destination Port")
+        self.packet_tree.heading("protocol", text="Protocol")
+        self.packet_tree.heading("length", text="Length")
+        self.packet_tree.heading("ttl", text="TTL")
+        self.packet_tree.heading("tcp_flags", text="TCP Flags")
+        self.packet_tree.heading("tcp_window", text="TCP Window")
+        self.packet_tree.heading("packet_direction", text="Direction")
+        self.packet_tree.heading("info", text="Info")
         
-        # Statistics tab with visualizations
-        self.stats_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.stats_tab, text="Analytics")
+        # Set column widths
+        self.packet_tree.column("no", width=50)
+        self.packet_tree.column("timestamp", width=150)
+        self.packet_tree.column("src_mac", width=150)
+        self.packet_tree.column("dst_mac", width=150)
+        self.packet_tree.column("src_ip", width=120)
+        self.packet_tree.column("dst_ip", width=120)
+        self.packet_tree.column("src_port", width=80)
+        self.packet_tree.column("dst_port", width=80)
+        self.packet_tree.column("protocol", width=80)
+        self.packet_tree.column("length", width=60)
+        self.packet_tree.column("ttl", width=50)
+        self.packet_tree.column("tcp_flags", width=100)
+        self.packet_tree.column("tcp_window", width=80)
+        self.packet_tree.column("packet_direction", width=80)
+        self.packet_tree.column("info", width=200)
         
-        # Create a frame for text stats and visualizations
-        self.stats_frame = ttk.Frame(self.stats_tab, padding=10)
-        self.stats_frame.pack(fill=tk.BOTH, expand=True)
+        # Add a scrollbar
+        scrollbar = ttk.Scrollbar(packet_list_frame, orient=tk.VERTICAL, command=self.packet_tree.yview)
+        self.packet_tree.configure(yscroll=scrollbar.set)
         
-        # Left side for text stats
-        stats_left = ttk.Frame(self.stats_frame)
-        stats_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        # Pack the treeview and scrollbar
+        self.packet_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # Add a label for stats
-        ttk.Label(stats_left, text="Capture Statistics", 
-                 font=("Segoe UI", 12, "bold")).pack(side=tk.TOP, anchor=tk.W, pady=(0, 5))
+        # Bind selection event to display packet details
+        self.packet_tree.bind("<<TreeviewSelect>>", self._on_packet_select)
         
-        self.stats_text = scrolledtext.ScrolledText(stats_left, wrap=tk.WORD, background="white", foreground="black")
-        self.stats_text.pack(fill=tk.BOTH, expand=True)
+        # Packet details frame
+        self.packet_details = ttk.LabelFrame(self.packets_frame, text="Packet Details")
+        self.packet_details.pack(fill=tk.X, expand=False, padx=5, pady=5)
         
-        # Right side for visualizations
-        self.stats_right = ttk.Frame(self.stats_frame)
-        self.stats_right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
+        # Text area for packet details
+        self.details_text = scrolledtext.ScrolledText(self.packet_details, height=10)
+        self.details_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Add a label for visualizations
-        ttk.Label(self.stats_right, text="Visualizations", 
-                 font=("Segoe UI", 12, "bold")).pack(side=tk.TOP, anchor=tk.W, pady=(0, 5))
+        # Analytics tab
+        self.analytics_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.analytics_frame, text="Analytics")
         
-        # Visualization tabs
-        self.viz_notebook = ttk.Notebook(self.stats_right)
-        self.viz_notebook.pack(fill=tk.BOTH, expand=True)
+        # Create main analytics layout with two frames
+        analytics_main_frame = ttk.Frame(self.analytics_frame)
+        analytics_main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Create visualization tabs
-        self.protocol_tab = ttk.Frame(self.viz_notebook, padding=5)
-        self.viz_notebook.add(self.protocol_tab, text="Protocols")
+        # Traffic Summary section - now takes 70% of height
+        summary_frame = ttk.LabelFrame(analytics_main_frame, text="Traffic Summary")
+        summary_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        self.ip_tab = ttk.Frame(self.viz_notebook, padding=5)
-        self.viz_notebook.add(self.ip_tab, text="IP Analysis")
+        self.summary_text = scrolledtext.ScrolledText(summary_frame, height=15)
+        self.summary_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        self.traffic_tab = ttk.Frame(self.viz_notebook, padding=5)
-        self.viz_notebook.add(self.traffic_tab, text="Traffic Flow")
+        # Protocol Distribution section - now takes 30% of height and is fixed size
+        protocol_container = ttk.Frame(analytics_main_frame)
+        protocol_container.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
         
-        # Network Data tab (for viewing CSV data)
-        self.data_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.data_tab, text="Network Data")
+        protocol_frame = ttk.LabelFrame(protocol_container, text="Protocol Distribution")
+        protocol_frame.pack(side=tk.LEFT, fill=tk.BOTH, padx=5, pady=5)
         
-        # Create a frame for the data table
-        data_frame = ttk.Frame(self.data_tab, padding=10)
-        data_frame.pack(fill=tk.BOTH, expand=True)
+        # Add a canvas for charts with fixed size
+        self.protocol_canvas = tk.Canvas(protocol_frame, bg="white", height=200, width=400)
+        self.protocol_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Add a Treeview widget for the data with styled appearance
-        tree_frame = ttk.Frame(data_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
+        # Raw Data tab
+        self.raw_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.raw_frame, text="Raw Data")
         
-        # Add a scrollbar for horizontal scrolling
-        h_scrollbar = ttk.Scrollbar(tree_frame, orient="horizontal")
-        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.raw_text = scrolledtext.ScrolledText(self.raw_frame)
+        self.raw_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Add a scrollbar for vertical scrolling
-        v_scrollbar = ttk.Scrollbar(tree_frame, orient="vertical")
-        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # Hex View tab
+        self.hex_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.hex_frame, text="Hex View")
         
-        # Configure the treeview with scrollbars
-        self.tree = ttk.Treeview(tree_frame, 
-                                xscrollcommand=h_scrollbar.set,
-                                yscrollcommand=v_scrollbar.set)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Add hex view controls
+        hex_controls_frame = ttk.Frame(self.hex_frame)
+        hex_controls_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        # Configure the scrollbars
-        h_scrollbar.config(command=self.tree.xview)
-        v_scrollbar.config(command=self.tree.yview)
+        ttk.Label(hex_controls_frame, text="Packet:").pack(side=tk.LEFT, padx=5, pady=5)
+        self.hex_packet_var = tk.StringVar()
+        self.hex_packet_dropdown = ttk.Combobox(hex_controls_frame, textvariable=self.hex_packet_var, width=10)
+        self.hex_packet_dropdown.pack(side=tk.LEFT, padx=5, pady=5)
         
-        # Status bar
-        self.status_var = tk.StringVar()
-        self.status_bar = ttk.Label(main_frame, textvariable=self.status_var, 
-                                   relief=tk.SUNKEN, anchor=tk.W, padding=(10, 5))
-        self.status_bar.pack(fill=tk.X, side=tk.BOTTOM, pady=5)
+        ttk.Button(hex_controls_frame, text="View", command=self._display_hex_view).pack(side=tk.LEFT, padx=5, pady=5)
         
-        # Initialize packet buffer for real-time capturing
-        self.packet_buffer = []
-        self.realtime_capturing = False
-        self.realtime_update_id = None
-        self.max_display_packets = 10000  # Maximum number of packets to store in memory
-        
-        # Initialize interface list
-        self.refresh_interfaces()
-        
-        # Set up real-time display by default
-        self.setup_realtime_display()
-        
-        # Create or reset the temp capture file
-        self.create_temp_capture_file()
+        # Hex view text area
+        self.hex_text = scrolledtext.ScrolledText(self.hex_frame, font=("Courier", 10))
+        self.hex_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
     
-    def refresh_interfaces(self):
-        """Refresh the list of network interfaces"""
-        self.status_var.set("Refreshing network interfaces...")
-        interfaces = get_windows_if_list()
+    def _create_statusbar(self):
+        """Create the status bar at the bottom of the window"""
+        self.status_frame = ttk.Frame(self.root, relief=tk.SUNKEN, border=1)
+        self.status_frame.pack(side=tk.BOTTOM, fill=tk.X)
         
-        if interfaces:
-            self.interface_combo['values'] = interfaces
-            self.interface_combo.current(0)
-            self.status_var.set(f"Found {len(interfaces)} network interfaces")
-        else:
-            self.status_var.set("No network interfaces found")
-            messagebox.showwarning("Warning", "No network interfaces found")
+        self.status_label = ttk.Label(self.status_frame, text="Ready")
+        self.status_label.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        self.packet_count_label = ttk.Label(self.status_frame, text="Packets: 0")
+        self.packet_count_label.pack(side=tk.RIGHT, padx=5, pady=2)
     
-    def toggle_capture_mode(self):
-        """Toggle between real-time and passive capture modes"""
-        if self.realtime_var.get():
-            # Real-time mode selected
-            self.passive_var.set(False)
-            self.capture_time_entry.config(state='disabled')
-            self.start_button.configure(text="Start Real-time Capture")
-        else:
-            # Passive mode selected
-            self.passive_var.set(True)
-            self.capture_time_entry.config(state='normal')
-            self.start_button.configure(text="Start Passive Capture")
+    def _log_debug(self, message):
+        """Add a message to the debug log"""
+        timestamp = time.strftime("%H:%M:%S")
+        print(f"DEBUG: [{timestamp}] {message}")
+        
+        # If debug text widget exists, also log there
+        if hasattr(self, 'debug_text'):
+            self.debug_text.insert(tk.END, f"[{timestamp}] {message}\n")
+            self.debug_text.see(tk.END)  # Scroll to the bottom
     
-    def start_realtime_default(self):
-        """Start real-time capture by default when the app launches"""
-        if self.interface_var.get() and not self.is_capturing:
-            # Only auto-start if an interface is selected and we're not already capturing
-            self.toggle_capture_mode()  # Make sure UI is consistent
-            self.start_capture()
-    
-    def start_passive_capture(self):
-        """Start a passive (non-real-time) capture"""
-        # Set capture mode to passive
-        self.passive_var.set(True)
-        self.realtime_var.set(False)
-        
-        # Enable capture time entry
-        self.capture_time_entry.config(state='normal')
-        
-        # Don't immediately start the capture - let the user edit the duration first
-        # Just update UI and wait for the user to press the Start button
-        self.status_var.set("Passive capture mode - set duration and press Start")
-        
-        # Change start button text
-        self.start_button.configure(text="Start Passive Capture")
+    def _load_interfaces(self):
+        """Load available network interfaces into the dropdown"""
+        try:
+            interfaces = sniffer.get_available_interfaces()
+            self.interface_dropdown['values'] = interfaces
+            if interfaces:
+                self.interface_dropdown.current(0)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load network interfaces: {str(e)}")
     
     def start_capture(self):
         """Start packet capture"""
-        if not self.interface_var.get():
+        if self.capture_in_progress:
+            return
+        
+        # Get interface
+        interface = self.interface_var.get()
+        if not interface:
             messagebox.showerror("Error", "Please select a network interface")
             return
         
+        # Get capture parameters
         try:
-            # Determine capture mode based on passive checkbox
-            if self.passive_var.get():
-                # Passive (time-limited) capture
-                capture_time = int(self.capture_time_var.get())
-                if capture_time <= 0:
-                    raise ValueError("Capture time must be positive")
-                self.realtime_capturing = False
-            else:
-                # Real-time capture (default)
-                capture_time = 0  # Continuous capture
-                self.realtime_capturing = True
+            # Determine mode and value
+            capture_mode = self.capture_mode.get() if hasattr(self.capture_mode, 'get') else "time"
+            self.capture_mode = capture_mode  # Store as instance variable
             
-            # Clear displays
-            self.live_text.delete(1.0, tk.END)
-            self.stats_text.delete(1.0, tk.END)
-            
-            # Clear visualizations
-            for widget in self.protocol_tab.winfo_children():
-                widget.destroy()
-            for widget in self.ip_tab.winfo_children():
-                widget.destroy()
-            for widget in self.traffic_tab.winfo_children():
-                widget.destroy()
-            
-            # Clear packet buffer for real-time mode
-            self.packet_buffer = []
-            
-            # Clear treeview for real-time mode
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-            
-            # Update UI state
-            self.is_capturing = True
-            self.start_button.configure(state=tk.DISABLED)
-            self.stop_button.configure(state=tk.NORMAL)
-            
-            # For real-time mode, set up the display before starting the capture
-            if self.realtime_capturing:
-                # Set up columns for real-time display
-                self.setup_realtime_display()
-                # Switch to the data tab to show real-time updates
-                self.notebook.select(self.data_tab)
-            
-            # Start capture in a thread
-            self.status_var.set(f"Starting capture on {self.interface_var.get()}...")
-            self.capture_thread = threading.Thread(
-                target=self.run_capture,
-                args=(self.interface_var.get(), capture_time)
-            )
-            self.capture_thread.daemon = True
-            self.capture_thread.start()
-            
-        except ValueError as e:
-            messagebox.showerror("Error", f"Invalid capture time: {str(e)}")
-            return
-    
-    def setup_realtime_display(self):
-        """Set up the treeview columns for real-time packet display"""
-        # Configure columns for the treeview
-        columns = [
-            'timestamp', 'source_ip', 'destination_ip', 'protocol', 
-            'length', 'source_port', 'destination_port', 'packet_direction'
-        ]
-        self.tree["columns"] = columns
-        
-        # Configure column headings
-        self.tree.column("#0", width=0, stretch=tk.NO)  # Hide the first column
-        
-        # Configure column widths
-        column_widths = {
-            'timestamp': 150,
-            'source_ip': 120,
-            'destination_ip': 120,
-            'protocol': 80,
-            'length': 60,
-            'source_port': 80,
-            'destination_port': 80,
-            'packet_direction': 100
-        }
-        
-        # Set up columns
-        for col in columns:
-            width = column_widths.get(col, 100)
-            self.tree.column(col, anchor=tk.W, width=width)
-            self.tree.heading(col, text=col.replace('_', ' ').title(), anchor=tk.W)
-        
-        # Configure row colors
-        self.tree.tag_configure('inbound', background='#EF9A9A')  # Red for inbound
-        self.tree.tag_configure('outbound', background='#A5D6A7')  # Green for outbound
-        
-        # Configure text colors for live_text widget
-        self.live_text.tag_configure('header', foreground='#000080', font=("Consolas", 10, "bold"))
-        self.live_text.tag_configure('inbound', foreground='#B71C1C')  # Dark red for inbound
-        self.live_text.tag_configure('outbound', foreground='#1B5E20')  # Dark green for outbound
-    
-    def update_realtime_display(self):
-        """Update the display with new packets in real-time mode"""
-        if not self.realtime_capturing:
-            print("Real-time capturing is disabled, not updating display")
+            if capture_mode == "time":
+                timeout = int(self.time_var.get()) if self.time_var.get() else 30
+                packet_count = 0  # Unlimited
+                self.capture_value = timeout
+            else:  # packet mode
+                packet_count = int(self.packets_var.get()) if self.packets_var.get() else 100
+                timeout = 0  # Unlimited
+                self.capture_value = packet_count
+                
+            if self.debug_mode:
+                mode_str = f"{timeout} seconds" if capture_mode == "time" else f"{packet_count} packets"
+                self._log_debug(f"Starting capture on {interface}, mode: {mode_str}")
+        except ValueError:
+            messagebox.showerror("Error", "Invalid capture parameters. Please enter numeric values.")
             return
         
-        # Print status for debugging
-        print(f"Updating real-time display. Current CSV: {self.current_csv}")
+        # Initialize capture state
+        self.capture_in_progress = True
+        self.stop_button.config(state=tk.NORMAL)
+        self.start_button.config(state=tk.DISABLED)
         
-        # Check if the current CSV file exists
-        csv_file_to_use = None
+        # Clear previous data
+        self.packet_tree.delete(*self.packet_tree.get_children())
+        self.details_text.delete(1.0, tk.END)
+        self.summary_text.delete(1.0, tk.END)
+        self.raw_text.delete(1.0, tk.END)
+        self.hex_text.delete(1.0, tk.END)
+        self.all_packets = []
         
-        # Try the expected path first
-        if self.current_csv and os.path.exists(self.current_csv):
-            csv_file_to_use = self.current_csv
-            print(f"Using existing CSV file at path: {csv_file_to_use}")
-        else:
-            print(f"Primary CSV path not found: {self.current_csv}")
-            print("Searching for CSV files in multiple locations...")
-            
-            # Search in current directory first
-            print("Looking in current directory...")
-            potential_files = [f for f in os.listdir('.') if f.endswith('.csv')]
-            
-            # If no files found, also check the workspace root directory
-            if not potential_files:
-                try:
-                    # Get the absolute path to determine workspace root
-                    current_dir = os.path.abspath('.')
-                    parent_dir = os.path.dirname(current_dir)
-                    
-                    print(f"Looking in parent directory: {parent_dir}")
-                    if os.path.exists(parent_dir):
-                        potential_files.extend([os.path.join(parent_dir, f) 
-                                              for f in os.listdir(parent_dir) 
-                                              if f.endswith('.csv')])
-                except Exception as e:
-                    print(f"Error checking parent directory: {e}")
-            
-            # If still no files, check common subdirectories
-            common_dirs = ['output', 'data', 'captures', 'temp']
-            for directory in common_dirs:
-                if not potential_files and os.path.exists(directory):
-                    print(f"Looking in {directory} directory...")
-                    potential_files.extend([os.path.join(directory, f) 
-                                          for f in os.listdir(directory) 
-                                          if f.endswith('.csv')])
-            
-            # Filter for all_packets files if multiple CSVs found
-            all_packets_files = [f for f in potential_files if 'all_packets' in os.path.basename(f)]
-            if all_packets_files:
-                potential_files = all_packets_files
-            
-            # If we found files, sort by modification time and use the most recent
-            if potential_files:
-                print(f"Found {len(potential_files)} potential CSV files:")
-                for i, file in enumerate(potential_files):
-                    try:
-                        size = os.path.getsize(file)
-                        mod_time = os.path.getmtime(file)
-                        print(f"  {i+1}. {file} - Size: {size} bytes, Modified: {datetime.fromtimestamp(mod_time)}")
-                    except:
-                        print(f"  {i+1}. {file} - Error getting details")
-                
-                # Sort by modification time to get the most recent
-                try:
-                    potential_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-                    csv_file_to_use = potential_files[0]
-                    print(f"Selected most recent CSV file: {csv_file_to_use}")
-                    # Update current_csv to use this file in future
-                    self.current_csv = csv_file_to_use
-                except Exception as e:
-                    print(f"Error sorting files by modification time: {e}")
-            else:
-                print("No CSV files found in any location")
+        # Set output filename
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        output_base = f"capture_{timestamp}"
         
-        # If we found a file to use, try to read it
-        if csv_file_to_use:
-            try:
-                # Read the CSV file
-                print(f"Reading CSV file: {csv_file_to_use}")
-                # Wrap in try/except to handle file access issues
-                try:
-                    with open(csv_file_to_use, 'r') as f:
-                        # Just checking if we can open the file
-                        pass
-                    
-                    # If we can open the file, read it with pandas
-                    df = pd.read_csv(csv_file_to_use)
-                    
-                    if not df.empty:
-                        print(f"CSV contains {len(df)} rows")
-                        # Get count of currently displayed packets
-                        current_count = len(self.tree.get_children())
-                        print(f"Currently displaying {current_count} packets")
-                        
-                        # If there are new rows to display
-                        if len(df) > current_count:
-                            # Get only the new rows
-                            new_rows = df.iloc[current_count:]
-                            print(f"Adding {len(new_rows)} new rows to display")
-                            
-                            # Add the new rows to the display
-                            self.add_rows_to_treeview(new_rows)
-                            
-                            # Also add to live capture text
-                            self.update_live_text(new_rows)
-                            
-                            # Update status
-                            self.status_var.set(f"Capturing packets in real-time. Total: {len(df)}")
-                    else:
-                        print("CSV file is empty")
-                except PermissionError:
-                    print(f"Permission denied accessing file: {csv_file_to_use}")
-                except FileNotFoundError:
-                    print(f"File not found during read: {csv_file_to_use}")
-            except Exception as e:
-                # Print errors from reading incomplete files
-                print(f"Error reading CSV during real-time update: {e}")
-        else:
-            print(f"No suitable CSV file found")
+        # Create and start the capture thread
+        self.stop_capture_event = threading.Event()
+        self.capture_thread = threading.Thread(
+            target=self._run_capture,
+            args=(interface, packet_count, timeout, output_base)
+        )
+        self.capture_thread.daemon = True
+        self.capture_thread.start()
         
-        # Schedule the next update if still capturing
-        if self.realtime_capturing:
-            print("Scheduling next update in 1 second")
-            self.realtime_update_id = self.root.after(1000, self.update_realtime_display)
-    
-    def update_live_text(self, new_rows):
-        """Update the live capture text widget with new packet data"""
-        # Format each row into a readable string and add to the live text widget
-        for _, row in new_rows.iterrows():
-            try:
-                # Format packet information
-                packet_info = f"[{row.get('timestamp', 'unknown')}] "
-                
-                # Add protocol info
-                if 'protocol' in row:
-                    packet_info += f"{str(row['protocol']).upper()} "
-                
-                # Add IP info
-                if 'source_ip' in row and 'destination_ip' in row:
-                    src_ip = row['source_ip'] if row['source_ip'] != 'N/A' else '-'
-                    dst_ip = row['destination_ip'] if row['destination_ip'] != 'N/A' else '-'
-                    packet_info += f"{src_ip} → {dst_ip} "
-                
-                # Add port info
-                if 'source_port' in row and 'destination_port' in row:
-                    if row['source_port'] != 'N/A' and row['destination_port'] != 'N/A':
-                        packet_info += f"(Port {row['source_port']} → {row['destination_port']}) "
-                
-                # Add packet length
-                if 'length' in row:
-                    packet_info += f"Size: {row['length']} bytes "
-                
-                # Add direction
-                if 'packet_direction' in row:
-                    packet_info += f"[{row['packet_direction']}]"
-                
-                # Add new line and insert into text widget
-                packet_info += "\n"
-                
-                # Set text color based on direction
-                if 'packet_direction' in row:
-                    direction = str(row['packet_direction']).lower()
-                    if 'inbound' in direction:
-                        self.live_text.insert(tk.END, packet_info, "inbound")
-                    elif 'outbound' in direction:
-                        self.live_text.insert(tk.END, packet_info, "outbound")
-                    else:
-                        self.live_text.insert(tk.END, packet_info)
-                else:
-                    self.live_text.insert(tk.END, packet_info)
-                
-                # Auto-scroll to the latest entry
-                self.live_text.see(tk.END)
-                
-            except Exception as e:
-                print(f"Error formatting packet for live display: {e}")
-                # Add a simple fallback format
-                self.live_text.insert(tk.END, f"Packet: {dict(row)}\n")
-                self.live_text.see(tk.END)
-                
-        # Update the packet counter
-        current_packet_count = len(self.tree.get_children())
-        self.packet_counter_var.set(f"Packets: {current_packet_count}")
-    
-    def stop_capture(self):
-        """Stop packet capture"""
-        if self.is_capturing:
-            self.is_capturing = False
-            self.realtime_capturing = False
-            self.status_var.set("Stopping capture...")
-            self.stop_button.configure(state=tk.DISABLED)
-            
-            # Cancel any pending real-time updates
-            if self.realtime_update_id:
-                self.root.after_cancel(self.realtime_update_id)
-                self.realtime_update_id = None
-    
-    def update_status(self, message):
-        """Update status bar with message from capture thread"""
-        # Update the status bar
-        self.status_var.set(message)
-        
-        # Log the message for debugging
-        print(f"Status update: {message}")
-        
-        # Check if we need to refresh the display for capture completion
-        if "completed" in message.lower():
-            # Extract the CSV filename from the message if present
-            csv_path = None
-            if ":" in message:
-                csv_path = message.split(":", 1)[1].strip()
-                
-                # Verify the path exists
-                if os.path.exists(csv_path):
-                    print(f"Found capture CSV file: {csv_path}")
-                    self.current_csv = csv_path
-                else:
-                    print(f"Warning: CSV file not found at path: {csv_path}")
-                    # Try to find the file in the current directory or output directory
-                    if os.path.exists(os.path.basename(csv_path)):
-                        self.current_csv = os.path.basename(csv_path)
-                        print(f"Found CSV file in current directory: {self.current_csv}")
-                    elif os.path.exists(os.path.join("output", os.path.basename(csv_path))):
-                        self.current_csv = os.path.join("output", os.path.basename(csv_path))
-                        print(f"Found CSV file in output directory: {self.current_csv}")
-            
-            # Check if we have a valid CSV file - either the one specified in the message
-            # or the one we were monitoring for real-time updates
-            if self.current_csv and os.path.exists(self.current_csv):
-                # Reset the UI and show results
-                self.reset_ui()
-                self.show_capture_results()
-                self.view_csv_data()
-            else:
-                # Look for any recently created CSV files
-                try:
-                    # First look for all_packets files
-                    csv_files = [f for f in os.listdir('.') if f.endswith('.csv') and f.startswith('all_packets')]
-                    if not csv_files:
-                        # Then look in the output directory
-                        if os.path.exists('output'):
-                            csv_files = [os.path.join('output', f) for f in os.listdir('output') 
-                                       if f.endswith('.csv') and f.startswith('capture_')]
-                        # Last resort, look for any CSV files
-                        if not csv_files:
-                            csv_files = [f for f in os.listdir('.') if f.endswith('.csv')]
-                    
-                    if csv_files:
-                        # Sort by modification time (newest first)
-                        csv_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-                        self.current_csv = csv_files[0]
-                        print(f"Found most recent CSV file: {self.current_csv}")
-                        
-                        # Reset the UI and show results
-                        self.reset_ui()
-                        self.show_capture_results()
-                        self.view_csv_data()
-                        return
-                except Exception as e:
-                    print(f"Error searching for CSV files: {e}")
-                
-                # If we still have no file, show error
-                self.reset_ui()
-                self.status_var.set("Capture completed, but no data file was created")
-                messagebox.showwarning("No Data", "Capture completed, but no data file was created")
-    
-    def complete_capture(self):
-        """Called when timed capture completes"""
-        if self.is_capturing:
-            self.stop_capture()
-            print("Capture completed, looking for CSV files...")
-            
-            # Check if we already have a valid CSV file
-            if self.current_csv and os.path.exists(self.current_csv):
-                print(f"Using existing CSV file: {self.current_csv}")
-                self.reset_ui()
-                self.show_capture_results()
-                self.view_csv_data()
-                return
-            
-            # If not, look for CSV files
-            try:
-                # First look for all_packets files
-                csv_files = [f for f in os.listdir('.') if f.endswith('.csv') and f.startswith('all_packets')]
-                if not csv_files:
-                    # Then look in the output directory
-                    if os.path.exists('output'):
-                        csv_files = [os.path.join('output', f) for f in os.listdir('output') 
-                                   if f.endswith('.csv')]
-                
-                if csv_files:
-                    # Sort by modification time (newest first)
-                    csv_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-                    self.current_csv = csv_files[0]
-                    print(f"Found most recent CSV file: {self.current_csv}")
-                    
-                    self.reset_ui()
-                    self.show_capture_results()
-                    self.view_csv_data()
-                else:
-                    # No CSV file found
-                    self.reset_ui()
-                    self.status_var.set("Capture completed, but no data file was created")
-                    messagebox.showwarning("No Data", "Capture completed, but no data file was created")
-            except Exception as e:
-                print(f"Error searching for CSV files: {e}")
-                self.reset_ui()
-                self.status_var.set(f"Error: {str(e)}")
-        else:
-            # Not capturing, just reset UI
-            self.reset_ui()
-    
-    def schedule_updates(self):
-        """Schedule periodic UI updates for real-time capture"""
-        if self.is_capturing:
-            # Update display if we have data
-            if os.path.exists(self.current_csv):
-                try:
-                    # Try to read the CSV file that's being written to
-                    df = pd.read_csv(self.current_csv)
-                    if not df.empty:
-                        self.status_var.set(f"Capturing packets in real-time. Total: {len(df)}")
-                        # Just reload the last few rows if there's new data
-                        current_count = len(self.tree.get_children())
-                        if len(df) > current_count:
-                            # There are new rows to display
-                            new_rows = df.iloc[current_count:]
-                            self.add_rows_to_treeview(new_rows)
-                except Exception as e:
-                    # Ignore errors from reading incomplete files
-                    pass
-                
-            # Check again in 1 second
-            self.root.after(1000, self.schedule_updates)
-    
-    def add_rows_to_treeview(self, df):
-        """Add dataframe rows to the treeview"""
-        if df.empty:
-            print("No rows to add to treeview - dataframe is empty")
+        # Update status
+        self.status_label.config(text=f"Starting capture on {interface}...")
+
+    def _update_display(self):
+        """Update display with captured packets from the queue"""
+        if not self.capture_in_progress:
             return
-            
-        print(f"Adding {len(df)} rows to treeview")
-        # Replace NaN values with "N/A" for better display
-        df = df.fillna("N/A")
         
-        # Format special columns
-        if 'protocol' in df.columns:
-            df['protocol'] = df['protocol'].astype(str).str.upper()
-            
-        if 'packet_direction' in df.columns:
-            df['packet_direction'] = df['packet_direction'].astype(str).str.capitalize()
-        
-        # Add the rows to the treeview
-        for _, row in df.iterrows():
-            values = row.tolist()
-            # Convert all values to strings with proper formatting
-            values = [str(val).strip() for val in values]
-            
-            # Apply row color based on packet direction if that column exists
-            tag = ""
-            if 'packet_direction' in df.columns:
-                packet_direction_index = df.columns.get_loc('packet_direction')
-                direction = values[packet_direction_index].lower()
-                
-                # Add with tags for coloring
-                if 'inbound' in direction:
-                    tag = 'inbound'
-                elif 'outbound' in direction:
-                    tag = 'outbound'
-            
-            # Insert at beginning to show newest first
-            self.tree.insert("", 0, values=values, tags=(tag,))
-            
-        # Limit the number of displayed packets
-        while len(self.tree.get_children()) > self.max_display_packets:
-            # Remove oldest packets (at the end)
-            last_item = self.tree.get_children()[-1]
-            self.tree.delete(last_item)
-            
-        print(f"Now displaying {len(self.tree.get_children())} rows in treeview")
-    
-    def run_capture(self, interface, capture_time):
-        """Execute the capture process"""
+        # Process packets waiting in the queue
         try:
-            # Create a redirector for stdout to capture live output
-            class StdoutRedirector:
-                def __init__(self, text_widget):
-                    self.text_widget = text_widget
-                    self.original_stdout = sys.stdout
-                
-                def write(self, string):
-                    self.original_stdout.write(string)
-                    self.text_widget.insert(tk.END, string)
-                    self.text_widget.see(tk.END)
-                    
-                    # Check if the string contains a path to a CSV file we should be monitoring
-                    if '.csv' in string and 'Full path to CSV file:' in string:
-                        try:
-                            # Extract the path
-                            path = string.split('Full path to CSV file:')[1].strip()
-                            # Update the current_csv
-                            self.text_widget.master.master.master.current_csv = path
-                            print(f"Detected CSV file path from output: {path}")
-                        except Exception as e:
-                            print(f"Error parsing CSV path from output: {e}")
-                
-                def flush(self):
-                    self.original_stdout.flush()
+            packets_processed = 0
+            start_time = time.time()
             
-            # Clear previous output
-            self.live_text.delete(1.0, tk.END)
+            # Process a batch of packets (up to 100 per update to avoid UI freezing)
+            while not self.packet_queue.empty() and packets_processed < 100:
+                packet_data = self.packet_queue.get_nowait()
+                packets_processed += 1
+                
+                # Add packet to our list
+                self.all_packets.append(packet_data)
+                packet_id = packet_data['id']
+                
+                # Add to treeview with protocol tag
+                protocol_tag = self._get_protocol_tag(packet_data['protocol'])
+                self.packet_tree.insert("", tk.END, values=(
+                    packet_id,
+                    packet_data['timestamp'], 
+                    packet_data['src_mac'], 
+                    packet_data['dst_mac'], 
+                    packet_data['src_ip'], 
+                    packet_data['dst_ip'], 
+                    packet_data['src_port'], 
+                    packet_data['dst_port'], 
+                    packet_data['protocol'], 
+                    packet_data['length'], 
+                    packet_data['ttl'], 
+                    packet_data['tcp_flags'], 
+                    packet_data['tcp_window'], 
+                    packet_data['packet_direction'], 
+                    packet_data['info']
+                ), tags=(protocol_tag,))
+                
+                # Update raw data tab (only for first 1000 packets to avoid memory issues)
+                if len(self.all_packets) <= 1000:
+                    raw_data = ", ".join(str(val) for val in packet_data['raw'] if val)
+                    self.raw_text.insert(tk.END, f"{packet_id}: {raw_data}\n")
+                    # Auto-scroll raw data to bottom
+                    self.raw_text.see(tk.END)
             
-            # Add a header to the live capture
-            header_text = "=== Network Packet Capture ===\n"
-            header_text += "Timestamp | Protocol | Source → Destination | Info\n"
-            header_text += "-----------------------------------------------------\n"
-            self.live_text.insert(tk.END, header_text, "header")
-            
-            # Redirect stdout to the text widget
-            stdout_redirector = StdoutRedirector(self.live_text)
-            original_stdout = sys.stdout
-            sys.stdout = stdout_redirector
-            
-            # Get selected interface name
-            interface_name = interface
-            
-            if not interface_name:
-                messagebox.showerror("Error", "Please select a network interface")
-                return
-            
-            # Create the output directory if it doesn't exist
-            if not os.path.exists("output"):
-                os.makedirs("output")
-            
-            # Create a fresh temp capture file that we'll initially monitor
-            self.create_temp_capture_file()
-            
-            # First, let's check for existing CSV files that might be useful
-            print("Preparing for capture, checking for existing CSV files...")
-            try:
-                # Look for all_packets files in the current directory
-                old_csv_files = [f for f in os.listdir('.') if f.endswith('.csv') and f.startswith('all_packets')]
-                for file in old_csv_files:
-                    try:
-                        # Check if the file is a valid CSV and has some rows
-                        try:
-                            df = pd.read_csv(file)
-                            if len(df) > 0:
-                                print(f"Found existing file with {len(df)} rows: {file}")
-                            else:
-                                print(f"Found empty CSV file: {file}")
-                        except:
-                            print(f"Invalid CSV file: {file} - will be ignored")
-                    except:
-                        pass
-            except Exception as e:
-                print(f"Error checking existing CSV files: {e}")
-            
-            print(f"Starting capture process. Will search for CSV files as they're created.")
-            
-            # If passive is selected, use timed capture, otherwise use real-time mode
-            if self.passive_var.get():
-                # Get the capture time
-                try:
-                    capture_time = int(self.capture_time_var.get())
-                    if capture_time <= 0:
-                        raise ValueError("Capture time must be positive")
-                except ValueError as e:
-                    messagebox.showerror("Error", str(e))
-                    return
+            # Auto-scroll packet list to most recent entry
+            if packets_processed > 0:
+                self.packet_tree.see(self.packet_tree.get_children()[-1])
                 
-                print(f"Starting passive capture for {capture_time} seconds")
-                
-                # Update button text back to normal
-                self.start_button.configure(text="Start Real-time Capture")
-                
-                # Make sure we set the notebook to display the live capture output
-                self.notebook.select(self.live_tab)
-                
-                # Start the sniffer with a time limit
-                self.sniffer = ThreadedSniffer(
-                    interface_name, 
-                    "output/ignored_filename.csv",  # This won't be used by the sniffer module
-                    callback=self.update_status,
-                    capture_time=capture_time
-                )
-                self.sniffer.start()
-                
-                # Schedule the capture to complete
-                self.root.after(capture_time * 1000 + 1000, self.complete_capture)
-            else:
-                # Start real-time sniffer
-                print("Starting real-time capture")
-                
-                # For real-time, we'll use a shorter duration and continuously restart 
-                # to ensure we get regular updates (30 minutes at a time)
-                self.sniffer = ThreadedSniffer(
-                    interface_name, 
-                    "output/ignored_filename.csv",  # This won't be used by the sniffer module
-                    callback=self.update_status,
-                    capture_time=1800  # 30 minutes at a time
-                )
-                self.sniffer.start()
-                self.status_var.set(f"Starting real-time capture on {interface_name}...")
-                
-                # Enable real-time updates
-                self.realtime_capturing = True
-                
-                # Set up real-time display
-                self.setup_realtime_display()
-                
-                # For real-time, we'll show both live capture and data tabs
-                # Use a custom frame to hold buttons for switching between views
-                tab_switcher = ttk.Frame(self.live_tab)
-                tab_switcher.pack(fill=tk.X, pady=5)
-                
-                ttk.Label(tab_switcher, text="View packet data in:").pack(side=tk.LEFT, padx=5)
-                
-                ttk.Button(tab_switcher, text="Live View", 
-                          command=lambda: self.notebook.select(self.live_tab)).pack(side=tk.LEFT, padx=5)
-                
-                ttk.Button(tab_switcher, text="Data Table", 
-                          command=lambda: self.notebook.select(self.data_tab)).pack(side=tk.LEFT, padx=5)
-                
-                # Start with the live capture tab visible
-                self.notebook.select(self.live_tab)
-                
-                # Wait a bit longer before starting updates to ensure file is created
-                print("Scheduling first real-time display update in 5 seconds")
-                self.root.after(5000, self.update_realtime_display)
-        
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to start capture: {str(e)}")
-            self.status_var.set(f"Error: {str(e)}")
-            
-        finally:
-            # Restore the original stdout
-            sys.stdout = original_stdout
-    
-    def reset_ui(self):
-        """Reset UI state after capture"""
-        self.is_capturing = False
-        self.start_button.configure(state=tk.NORMAL)
-        self.stop_button.configure(state=tk.DISABLED)
-    
-    def show_capture_results(self):
-        """Display capture statistics and visualizations"""
-        if self.current_csv and os.path.exists(self.current_csv):
-            try:
-                # Read the CSV file and generate statistics
-                df = pd.read_csv(self.current_csv)
-                
-                stats = []
-                stats.append(f"=== Capture Statistics ===")
-                stats.append(f"Capture time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                stats.append(f"Total packets: {len(df)}")
-                stats.append(f"CSV File: {self.current_csv}")
-                stats.append("")
-                
-                # Protocol distribution
-                protocol_data = None
-                if 'protocol' in df.columns:
-                    stats.append("Protocol Distribution:")
-                    protocol_counts = df['protocol'].value_counts()
-                    protocol_data = protocol_counts
-                    for protocol, count in protocol_counts.items():
-                        stats.append(f"  {protocol}: {count} ({count/len(df)*100:.2f}%)")
-                
-                # Source IP distribution
-                source_data = None
-                if 'source_ip' in df.columns:
-                    stats.append("\nTop Source IPs:")
-                    source_counts = df['source_ip'].value_counts().head(10)
-                    source_data = source_counts
-                    for ip, count in source_counts.items():
-                        stats.append(f"  {ip}: {count}")
-                
-                # Destination IP distribution
-                dest_data = None
-                if 'destination_ip' in df.columns:
-                    stats.append("\nTop Destination IPs:")
-                    dest_counts = df['destination_ip'].value_counts().head(10)
-                    dest_data = dest_counts
-                    for ip, count in dest_counts.items():
-                        stats.append(f"  {ip}: {count}")
-                
-                # Traffic direction
-                direction_data = None
-                if 'packet_direction' in df.columns:
-                    stats.append("\nTraffic Direction:")
-                    direction_counts = df['packet_direction'].value_counts()
-                    direction_data = direction_counts
-                    for direction, count in direction_counts.items():
-                        stats.append(f"  {direction}: {count} ({count/len(df)*100:.2f}%)")
-                
-                # TCP Flags (if present)
-                tcp_flags_data = None
-                if 'tcp_flags' in df.columns:
-                    tcp_data = df[df['protocol'] == 'TCP']
-                    if not tcp_data.empty:
-                        stats.append("\nTCP Flags Distribution:")
-                        flag_counts = tcp_data['tcp_flags'].value_counts().head(10)
-                        tcp_flags_data = flag_counts
-                        for flags, count in flag_counts.items():
-                            stats.append(f"  {flags}: {count}")
-                
-                # HTTP specific stats
-                http_data = None
-                if 'http_host' in df.columns:
-                    http_hosts = df[df['http_host'] != 'N/A']['http_host'].value_counts()
-                    if not http_hosts.empty:
-                        stats.append("\nTop HTTP Hosts:")
-                        http_data = http_hosts.head(10)
-                        for host, count in http_data.items():
-                            stats.append(f"  {host}: {count}")
-                
-                # Display text results
-                self.stats_text.delete(1.0, tk.END)
-                self.stats_text.insert(tk.END, "\n".join(stats))
-                
-                # Create visualizations with light theme
-                # Set matplotlib style for light theme
-                plt.style.use('default')
-                
-                # Protocol Distribution Pie Chart
-                if protocol_data is not None and len(protocol_data) > 0:
-                    self.create_pie_chart(
-                        self.protocol_tab, 
-                        protocol_data, 
-                        "Network Protocol Distribution",
-                        colors=['#4285F4', '#EA4335', '#FBBC05', '#34A853', '#8334A8', '#F77234', '#3AAEE1']
-                    )
-                
-                # IP Analysis Charts
-                if source_data is not None and dest_data is not None:
-                    # Create a frame to hold two charts side by side
-                    ip_frame = ttk.Frame(self.ip_tab)
-                    ip_frame.pack(fill=tk.BOTH, expand=True)
-                    
-                    # Source IPs
-                    source_frame = ttk.Frame(ip_frame)
-                    source_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-                    self.create_bar_chart(
-                        source_frame,
-                        source_data,
-                        "Top Source IPs",
-                        x_label="IP Address",
-                        y_label="Packet Count",
-                        color='#4285F4'
-                    )
-                    
-                    # Destination IPs
-                    dest_frame = ttk.Frame(ip_frame)
-                    dest_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-                    self.create_bar_chart(
-                        dest_frame,
-                        dest_data,
-                        "Top Destination IPs",
-                        x_label="IP Address",
-                        y_label="Packet Count",
-                        color='#EA4335'
-                    )
-                
-                # Traffic Direction Chart
-                if direction_data is not None:
-                    self.create_pie_chart(
-                        self.traffic_tab,
-                        direction_data,
-                        "Traffic Direction",
-                        colors=['#34A853', '#EA4335', '#4285F4']
-                    )
-                
-                # Update status
-                self.status_var.set(f"Capture completed: {len(df)} packets captured")
-                
-                # Switch to the statistics tab
-                self.notebook.select(self.stats_tab)
-                
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to analyze results: {str(e)}")
-                self.status_var.set("Error analyzing capture results")
-        else:
-            self.status_var.set("No capture results available")
-    
-    def create_pie_chart(self, parent, data, title, colors=None):
-        """Create a pie chart visualization"""
-        try:
-            # Create figure and axis with white background
-            fig, ax = plt.subplots(figsize=(6, 4), dpi=100, facecolor='white')
-            
-            # Plot pie chart
-            wedges, texts, autotexts = ax.pie(
-                data.values, 
-                labels=data.index,
-                autopct='%1.1f%%',
-                startangle=90,
-                colors=colors
-            )
-            
-            # Make text more visible
-            for text in texts:
-                text.set_fontsize(9)
-                text.set_color('black')  # Black text for visibility
-            for autotext in autotexts:
-                autotext.set_fontsize(9)
-                autotext.set_color('white')
-            
-            # Equal aspect ratio ensures pie is circular
-            ax.axis('equal')
-            ax.set_title(title, color='black')  # Black title for visibility
-            
-            # Create canvas and add to parent
-            canvas = FigureCanvasTkAgg(fig, master=parent)
-            canvas.draw()
-            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        except Exception as e:
-            print(f"Error creating pie chart: {e}")
-            ttk.Label(parent, text=f"Could not create chart: {str(e)}").pack(pady=20)
-    
-    def create_bar_chart(self, parent, data, title, x_label="", y_label="", color='#4285F4'):
-        """Create a bar chart visualization"""
-        try:
-            # Create figure and axis with white background
-            fig, ax = plt.subplots(figsize=(6, 4), dpi=100, facecolor='white')
-            
-            # Set background color
-            ax.set_facecolor('white')
-            
-            # For empty data, show placeholder
-            if len(data) == 0:
-                ax.text(0.5, 0.5, "No data available", 
-                       ha='center', va='center', fontsize=12, color='black')
-                ax.set_title(title, color='black')
-                canvas = FigureCanvasTkAgg(fig, master=parent)
-                canvas.draw()
-                canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-                return
-                
-            # Plot bar chart (horizontal)
-            bars = ax.barh(data.index, data.values, color=color)
-            
-            # Add value labels
-            for bar in bars:
-                width = bar.get_width()
-                ax.text(width + (width * 0.02), 
-                       bar.get_y() + bar.get_height()/2, 
-                       f'{int(width)}',
-                       va='center', fontsize=8, color='black')  # Black text for visibility
-            
-            # Set labels and title with black text
-            ax.set_xlabel(x_label, color='black')
-            ax.set_ylabel(y_label, color='black')
-            ax.set_title(title, color='black')
-            
-            # Set tick colors to black for visibility
-            ax.tick_params(colors='black')
-            
-            # Adjust layout for better display
-            plt.tight_layout()
-            
-            # Create canvas and add to parent
-            canvas = FigureCanvasTkAgg(fig, master=parent)
-            canvas.draw()
-            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        except Exception as e:
-            print(f"Error creating bar chart: {e}")
-            ttk.Label(parent, text=f"Could not create chart: {str(e)}").pack(pady=20)
-    
-    def view_csv_data(self):
-        """Display CSV data in the treeview"""
-        if not self.current_csv:
-            print("No current CSV file set")
-            messagebox.showinfo("Info", "No CSV file available")
-            return
-            
-        if not os.path.exists(self.current_csv):
-            print(f"CSV file does not exist at path: {self.current_csv}")
-            # Try to find the file in current directory or output directory
-            basename = os.path.basename(self.current_csv)
-            if os.path.exists(basename):
-                self.current_csv = basename
-                print(f"Found file in current directory: {self.current_csv}")
-            elif os.path.exists(os.path.join("output", basename)):
-                self.current_csv = os.path.join("output", basename)
-                print(f"Found file in output directory: {self.current_csv}")
-            else:
-                messagebox.showinfo("Info", f"CSV file not found: {self.current_csv}")
-                return
-        
-        try:
-            # Read the CSV file
-            print(f"Reading CSV file for display: {self.current_csv}")
-            df = pd.read_csv(self.current_csv)
-            print(f"CSV file contains {len(df)} rows")
-            
-            # Replace NaN values with "N/A" for better display
-            df = df.fillna("N/A")
-            
-            # Clear the treeview
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-                
-            # Configure columns
-            columns = list(df.columns)
-            self.tree["columns"] = columns
-            
-            # Configure column headings
-            self.tree.column("#0", width=0, stretch=tk.NO)  # Hide the first column
-            
-            # Configure column widths based on content type
-            column_widths = {
-                'timestamp': 150,
-                'source_mac': 150, 
-                'destination_mac': 150,
-                'source_ip': 120,
-                'destination_ip': 120,
-                'source_port': 80,
-                'destination_port': 80,
-                'protocol': 80,
-                'length': 60,
-                'ttl': 50,
-                'tcp_flags': 100,
-                'tcp_window': 80,
-                'icmp_type': 80,
-                'icmp_code': 80,
-                'dns_query': 200,
-                'http_method': 80,
-                'http_host': 200,
-                'http_path': 200,
-                'packet_direction': 100
-            }
-            
-            # Apply specific formatting for each column
-            for col in columns:
-                # Get optimal width or use default
-                width = column_widths.get(col.lower(), 100)
-                self.tree.column(col, anchor=tk.W, width=width)
-                self.tree.heading(col, text=col.replace('_', ' ').title(), anchor=tk.W)
-            
-            # Add data to the treeview (limit to 1000 rows for performance)
-            max_rows = 1000
-            display_rows = min(len(df), max_rows)
-            
-            # Format special columns
-            if 'protocol' in df.columns:
-                df['protocol'] = df['protocol'].astype(str).str.upper()
-                
-            if 'packet_direction' in df.columns:
-                df['packet_direction'] = df['packet_direction'].astype(str).str.capitalize()
-            
-            # Add the rows to the treeview
-            for i in range(display_rows):
-                values = df.iloc[i].tolist()
-                # Convert all values to strings with proper formatting
-                values = [str(val).strip() for val in values]
-                
-                # Apply row color based on packet direction if that column exists
-                packet_direction_index = -1
-                if 'packet_direction' in df.columns:
-                    packet_direction_index = df.columns.get_loc('packet_direction')
-                    direction = values[packet_direction_index].lower()
-                    
-                    # Add with tags for coloring
-                    if 'inbound' in direction:
-                        self.tree.insert("", tk.END, values=values, tags=('inbound',))
-                    elif 'outbound' in direction:
-                        self.tree.insert("", tk.END, values=values, tags=('outbound',))
-                    else:
-                        self.tree.insert("", tk.END, values=values)
-                else:
-                    self.tree.insert("", tk.END, values=values)
-            
-            # Configure row colors - DARKER COLORS
-            self.tree.tag_configure('inbound', background='#EF9A9A')  # Darker red for inbound
-            self.tree.tag_configure('outbound', background='#A5D6A7')  # Darker green for outbound
-                
-            # Switch to the data tab
-            self.notebook.select(self.data_tab)
+                # Update dropdown for hex viewer
+                packet_ids = [str(p['id']) for p in self.all_packets[-100:]]  # Last 100 packets
+                self.hex_packet_var.set(packet_ids[-1] if packet_ids else "")
+                self.hex_packet_dropdown['values'] = packet_ids
             
             # Update status
-            rows_count = len(self.tree.get_children())
-            print(f"Added {rows_count} rows to treeview")
-            if len(df) > max_rows:
-                self.status_var.set(f"Displaying {max_rows} of {len(df)} rows. Open the CSV file to view all data.")
+            total_packets = len(self.all_packets)
+            queue_size = self.packet_queue.qsize()
+            elapsed = time.time() - getattr(self, 'capture_start_time', time.time())
+            packet_rate = total_packets / elapsed if elapsed > 0 else 0
+            
+            self.status_label.config(text=f"Capturing... {total_packets} packets ({packet_rate:.1f}/sec) - Queue: {queue_size}")
+            
+            if self.debug_mode and packets_processed > 0:
+                self._log_debug(f"Processed {packets_processed} packets in {(time.time()-start_time)*1000:.1f}ms, queue size: {queue_size}")
+                
+        except Exception as e:
+            self.status_label.config(text=f"Error updating display: {str(e)}")
+            if self.debug_mode:
+                self._log_debug(f"Display error: {str(e)}")
+        
+        # Schedule the next update if capture is still in progress
+        if self.capture_in_progress:
+            # Schedule next update - use shorter interval when packets are available
+            update_interval = 200 if not self.packet_queue.empty() else 1000
+            self.root.after(update_interval, self._update_display)
+
+    def _run_capture(self, interface, packet_count, timeout, output_base):
+        """Run the packet capture with the given parameters"""
+        try:
+            # Create a temporary directory for captures if needed
+            os.makedirs(os.path.dirname(output_base) or '.', exist_ok=True)
+            
+            # Update UI state
+            self.status_label.config(text=f"Capturing packets on {interface}...")
+            
+            # Check if Scapy is available
+            if not HAS_SCAPY:
+                error_msg = "Scapy is installed but could not be imported properly. This may be due to permissions issues."
+                error_details = "Try running this application as administrator or with elevated privileges."
+                
+                if sys.platform == 'win32':
+                    error_details += "\nOn Windows, you may need to run with administrator privileges and have Npcap installed."
+                
+                self.status_label.config(text="Scapy import failed - permissions issue?")
+                messagebox.showerror("Scapy Error", f"{error_msg}\n\n{error_details}")
+                
+                self.capture_in_progress = False
+                self.start_button.config(state=tk.NORMAL)
+                self.stop_button.config(state=tk.DISABLED)
+                return
+                
+            # Try importing Scapy again at runtime (sometimes this works when the module level import fails)
+            try:
+                import scapy.all as scapy_runtime
+                if self.debug_mode:
+                    self._log_debug("Successfully imported Scapy at runtime")
+            except Exception as e:
+                if self.debug_mode:
+                    self._log_debug(f"Runtime Scapy import failed: {str(e)}")
+            
+            # Set up for packet capture
+            self.capture_start_time = time.time()
+            
+            # Run capture using sniffer module's standard method
+            if self.debug_mode:
+                self._log_debug(f"Calling sniffer.capture_network_details with: interface={interface}, packet_count={packet_count}, timeout={timeout}")
+            
+            # Get the output filenames
+            csv_file = f"{output_base}.csv"
+            pcap_file = f"{output_base}.pcap"
+            
+            # Call sniffer.capture_network_details with the correct parameters
+            # Inspect the function signature to see what parameters it expects
+            try:
+                # First try the form with output_csv and output_pcap as parameters
+                stats = sniffer.capture_network_details(
+                    interface=interface,
+                    packet_count=packet_count,
+                    timeout=timeout,
+                    output_csv=csv_file,
+                    output_pcap=pcap_file
+                )
+                # If successful, this function might return just stats
+                self.csv_file = csv_file
+            except TypeError:
+                # If that fails, try the form with just output_file
+                try:
+                    stats = sniffer.capture_network_details(
+                        interface=interface,
+                        packet_count=packet_count,
+                        timeout=timeout,
+                        output_file=csv_file
+                    )
+                    self.csv_file = csv_file
+                except TypeError:
+                    # If that also fails, try with just the basic parameters
+                    stats = sniffer.capture_network_details(
+                        interface=interface,
+                        packet_count=packet_count,
+                        timeout=timeout
+                    )
+                    # In this case, we may need to determine csv_file from the return value
+                    self.csv_file = getattr(stats, 'csv_file', csv_file)
+            
+            # Store results
+            self.stats = stats
+            
+            # Check if the CSV file exists and log its path and contents
+            if os.path.exists(self.csv_file):
+                if self.debug_mode:
+                    self._log_debug(f"CSV file exists at: {self.csv_file}")
+                    with open(self.csv_file, 'r') as f:
+                        line_count = sum(1 for _ in f)
+                    self._log_debug(f"CSV file contains {line_count} lines (including header)")
             else:
-                self.status_var.set(f"Displaying all {len(df)} rows")
+                if self.debug_mode:
+                    self._log_debug(f"CSV file not found at: {self.csv_file}")
+                # Look for csv files in the output directory
+                csv_files = [f for f in os.listdir(os.path.dirname(output_base) or '.') if f.endswith('.csv')]
+                if csv_files:
+                    if self.debug_mode:
+                        self._log_debug(f"Found CSV files in directory: {csv_files}")
+                    # Use the most recent csv file
+                    most_recent = max(csv_files, key=lambda f: os.path.getmtime(os.path.join(os.path.dirname(output_base) or '.', f)))
+                    self.csv_file = os.path.join(os.path.dirname(output_base) or '.', most_recent)
+                    if self.debug_mode:
+                        self._log_debug(f"Using most recent CSV file: {self.csv_file}")
+            
+            # Create a manual lookup for the CSV file based on terminal output
+            # The sniffer module might print the output file path to the terminal
+            if self.debug_mode:
+                self._log_debug("Looking for CSV file in working directory")
+                all_files = os.listdir('.')
+                csv_files = [f for f in all_files if f.endswith('.csv')]
+                if csv_files:
+                    self._log_debug(f"Found CSV files in working directory: {csv_files}")
+                
+                capture_dir = os.path.join('.', 'capture')
+                if os.path.exists(capture_dir) and os.path.isdir(capture_dir):
+                    capture_files = os.listdir(capture_dir)
+                    csv_capture_files = [os.path.join(capture_dir, f) for f in capture_files if f.endswith('.csv')]
+                    if csv_capture_files:
+                        self._log_debug(f"Found CSV files in capture directory: {csv_capture_files}")
+                        # Use the most recent csv file from the capture directory
+                        most_recent = max(csv_capture_files, key=os.path.getmtime)
+                        self.csv_file = most_recent
+                        self._log_debug(f"Using most recent CSV file from capture directory: {self.csv_file}")
+            
+            # Update the UI after capture
+            self._update_capture_status()
+            
+            if self.debug_mode:
+                self._log_debug(f"Capture completed: {getattr(stats, 'total_packets', 0)} packets")
                 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load CSV data: {str(e)}")
-            print(f"Error details: {e}")  # Print detailed error for debugging
-    
-    def open_csv(self):
-        """Open CSV file with system default app"""
-        if self.current_csv and os.path.exists(self.current_csv):
-            try:
-                # Print the full path for debugging
-                print(f"Opening CSV file: {os.path.abspath(self.current_csv)}")
-                
-                if os.name == 'nt':  # Windows
-                    os.startfile(self.current_csv)
+            error_message = str(e)
+            if "permission" in error_message.lower() or "access" in error_message.lower():
+                error_message = "Permission denied. Try running as administrator."
+                if sys.platform == 'win32':
+                    error_message += "\nOn Windows, you need administrator privileges and Npcap installed."
+            
+            self.status_label.config(text=f"Error during capture: {error_message}")
+            self.capture_in_progress = False
+            self.start_button.config(state=tk.NORMAL)
+            self.stop_button.config(state=tk.DISABLED)
+            messagebox.showerror("Capture Error", f"Failed to capture packets: {error_message}")
+            
+            if self.debug_mode:
+                self._log_debug(f"Capture error: {str(e)}")
+                import traceback
+                self._log_debug(traceback.format_exc())
+
+    def _update_capture_status(self):
+        """Update the UI after capture is complete"""
+        try:
+            if self.stats:
+                # Check if stats is a dictionary or an object
+                if isinstance(self.stats, dict):
+                    total_packets = self.stats.get('total_packets', 0)
                 else:
-                    import subprocess
-                    subprocess.call(['xdg-open', self.current_csv])
+                    # Try to access as an attribute
+                    total_packets = getattr(self.stats, 'total_packets', 0)
+                
+                # Load the packets from csv if it exists
+                if self.csv_file and os.path.exists(self.csv_file):
+                    self._load_packets_from_csv(self.csv_file)
                     
-                self.status_var.set(f"Opened CSV file: {self.current_csv}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to open CSV file: {str(e)}")
-        else:
-            messagebox.showinfo("Info", "No CSV file available")
-    
-    def open_csv_directory(self):
-        """Open the directory containing the current CSV file"""
-        if self.current_csv and os.path.exists(self.current_csv):
-            try:
-                # Get the directory path
-                dir_path = os.path.dirname(os.path.abspath(self.current_csv))
+                    # Create stats from the packet list if they don't exist
+                    if total_packets == 0 and self.all_packets:
+                        total_packets = len(self.all_packets)
+                        if isinstance(self.stats, dict):
+                            self.stats['total_packets'] = total_packets
                 
-                # Open the directory
-                if os.name == 'nt':  # Windows
-                    os.startfile(dir_path)
-                elif os.name == 'darwin':  # macOS
-                    subprocess.call(['open', dir_path])
-                else:  # Linux and other Unix
-                    subprocess.call(['xdg-open', dir_path])
+                # Update analytics
+                self._display_capture_results()
                 
-                self.status_var.set(f"Opened directory: {dir_path}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to open directory: {str(e)}")
-        else:
-            # If no current CSV, open the current working directory
-            try:
-                current_dir = os.getcwd()
-                if os.name == 'nt':  # Windows
-                    os.startfile(current_dir)
-                elif os.name == 'darwin':  # macOS
-                    subprocess.call(['open', current_dir])
-                else:  # Linux and other Unix
-                    subprocess.call(['xdg-open', current_dir])
-                
-                self.status_var.set(f"Opened current directory: {current_dir}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to open directory: {str(e)}")
-    
-    def load_external_csv(self):
-        """Load an external CSV file"""
-        file_path = filedialog.askopenfilename(
-            title="Select CSV File to Load",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
-        )
-        
-        if not file_path:
-            return
-        
-        try:
-            # Test if file can be read as CSV
-            df = pd.read_csv(file_path)
-            
-            # Set as current CSV
-            self.current_csv = file_path
-            
-            # Show results
-            self.show_capture_results()
-            self.view_csv_data()
-            
-            self.status_var.set(f"Loaded external CSV file: {file_path}")
+                # Update status with packet count
+                self.status_label.config(text=f"Capture complete: {total_packets} packets captured")
+            else:
+                # If no stats but we have packets, create stats from the packet list
+                if self.all_packets:
+                    total_packets = len(self.all_packets)
+                    if self.debug_mode:
+                        self._log_debug(f"Creating stats from {total_packets} loaded packets")
+                    self._display_capture_results()
+                    self.status_label.config(text=f"Capture complete: {total_packets} packets captured")
+                else:
+                    self.status_label.config(text="Capture complete: No stats available")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load CSV file: {str(e)}")
-    
-    def export_results(self):
-        """Export capture results to a user-selected location"""
-        if not self.current_csv or not os.path.exists(self.current_csv):
-            messagebox.showinfo("Info", "No capture results to export")
-            return
+            if self.debug_mode:
+                self._log_debug(f"Error in _update_capture_status: {str(e)}")
+                import traceback
+                self._log_debug(traceback.format_exc())
+            self.status_label.config(text="Capture complete")
         
-        # Ask user where to save the file
-        default_filename = os.path.basename(self.current_csv)
-        export_path = filedialog.asksaveasfilename(
-            title="Export Network Data", 
-            defaultextension=".csv",
-            initialfile=default_filename,
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
-        )
+        # Reset UI state
+        self.capture_in_progress = False
+        self.start_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.DISABLED)
+
+    def _on_capture_complete(self):
+        """Called when the capture is complete."""
+        self.status_var.set(f"Capture complete: {len(self.all_packets)} packets captured")
+        self.capture_btn.config(text="Start Capture", command=self._run_capture)
         
-        if not export_path:
-            return  
+        # Update the filter dropdown with available protocols
+        protocols = sorted(list(set(p.get('protocol', 'Unknown') for p in self.all_packets if p.get('protocol'))))
+        # Add "All" and "Other" options
+        self.protocol_filter_combo['values'] = ["All"] + protocols + ["Other"]
+        self.protocol_filter_combo.current(0)
         
+        # Update visualizations with final data
+        self._update_visualizations()
+
+    def _stop_capture(self):
+        """Stop the current capture."""
+        if hasattr(self, 'stop_capture_event'):
+            self.stop_capture_event.set()
+        
+        self.status_var.set("Stopping capture...")
+        self.capture_btn.config(state=tk.DISABLED)
+        
+        # Process any remaining packets in the queue
+        self._process_packet_queue()
+
+    def _apply_filters(self):
+        """Apply filters to the packet display"""
+        # Get filter values
+        protocol_filter = self.protocol_filter.get()
+        ip_filter = self.ip_filter.get().strip()
+        port_filter = self.port_filter.get().strip()
+        
+        # Clear current display
+        self.packet_tree.delete(*self.packet_tree.get_children())
+        
+        # Apply filters
+        filtered_packets = []
+        for packet in self.all_packets:
+            # Protocol filter
+            if protocol_filter != "All" and packet['protocol'].upper() != protocol_filter.upper():
+                if protocol_filter == "Other" and packet['protocol'].upper() in ["TCP", "UDP", "ICMP", "ARP"]:
+                    continue
+                elif protocol_filter != "Other":
+                    continue
+            
+            # IP filter
+            if ip_filter and ip_filter not in packet['src_ip'] and ip_filter not in packet['dst_ip']:
+                continue
+            
+            # Port filter
+            if port_filter and port_filter not in packet['src_port'] and port_filter not in packet['dst_port']:
+                continue
+            
+            # Packet passed all filters
+            filtered_packets.append(packet)
+        
+        # Display filtered packets
+        for i, packet in enumerate(filtered_packets, 1):
+            protocol_tag = self._get_protocol_tag(packet['protocol'])
+            
+            self.packet_tree.insert("", tk.END, values=(
+                packet['id'],
+                packet['timestamp'],
+                packet['src_mac'],
+                packet['dst_mac'],
+                packet['src_ip'],
+                packet['dst_ip'],
+                packet['src_port'],
+                packet['dst_port'],
+                packet['protocol'],
+                packet['length'],
+                packet['ttl'],
+                packet['tcp_flags'],
+                packet['tcp_window'],
+                packet['packet_direction'],
+                packet['info']
+            ), tags=(protocol_tag,))
+        
+        # Update status
+        self.status_label.config(text=f"Filtered: {len(filtered_packets)} packets")
+
+    def _clear_filters(self):
+        """Clear all filters and show all packets"""
+        # Reset filter values
+        self.protocol_filter.current(0)
+        self.ip_filter.delete(0, tk.END)
+        self.port_filter.delete(0, tk.END)
+        
+        # Clear current display
+        self.packet_tree.delete(*self.packet_tree.get_children())
+        
+        # Show all packets
+        for packet in self.all_packets:
+            protocol_tag = self._get_protocol_tag(packet['protocol'])
+            
+            self.packet_tree.insert("", tk.END, values=(
+                packet['id'],
+                packet['timestamp'],
+                packet['src_mac'],
+                packet['dst_mac'],
+                packet['src_ip'],
+                packet['dst_ip'],
+                packet['src_port'],
+                packet['dst_port'],
+                packet['protocol'],
+                packet['length'],
+                packet['ttl'],
+                packet['tcp_flags'],
+                packet['tcp_window'],
+                packet['packet_direction'],
+                packet['info']
+            ), tags=(protocol_tag,))
+        
+        # Update status
+        self.status_label.config(text=f"Showing all {len(self.all_packets)} packets")
+
+    def _display_hex_view(self):
+        """Display hexadecimal view of the selected packet in Wireshark style"""
         try:
-            import shutil
-            # Copy the file to the new location
-            shutil.copy2(self.current_csv, export_path)
+            packet_id = int(self.hex_packet_var.get())
             
-            messagebox.showinfo("Success", f"Exported data to:\n{export_path}")
-            self.status_var.set(f"Data exported to {export_path}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Export failed: {str(e)}")
+            # Find the packet in the all_packets list
+            packet = None
+            for p in self.all_packets:
+                if p['id'] == packet_id:
+                    packet = p
+                    break
             
-    def list_all_captures(self):
-        """List all available packet capture files"""
-        try:
-            # Find all packet capture files in the current directory
-            captures = [f for f in os.listdir('.') if f.startswith('all_packets') and f.endswith('.csv')]
-            
-            if not captures:
-                messagebox.showinfo("Info", "No capture files found")
+            if not packet:
+                self.hex_text.delete(1.0, tk.END)
+                self.hex_text.insert(tk.END, f"Packet {packet_id} not found")
                 return
             
-            # Show file selection dialog
-            capture_selection = tk.Toplevel(self.root)
-            capture_selection.title("Select Capture File")
-            capture_selection.geometry("600x450")
-            capture_selection.configure(background="white")
+            # Debug: log the keys in the packet to help diagnose
+            if self.debug_mode:
+                self._log_debug(f"Packet keys: {packet.keys()}")
+                if 'raw' in packet:
+                    self._log_debug(f"Raw data type: {type(packet['raw'])}, content preview: {str(packet['raw'])[:100]}")
+                else:
+                    self._log_debug("No 'raw' key found in the packet")
             
-            ttk.Label(capture_selection, text="Select a capture file to load:", 
-                     font=("Segoe UI", 12, "bold")).pack(pady=10)
+            # Set color scheme based on theme
+            if self.current_theme == "dark":
+                self.hex_text.config(background="#0f0f0f", foreground="#ffffff")
+                offset_color = "#66cdaa"    # Light seafoam for offsets
+                hex_color = "#ffffff"       # White for hex values
+                ascii_color = "#add8e6"     # Light blue for ASCII
+                separator_color = "#808080" # Gray for separators
+                highlight_color = "#3a3a3a" # Dark gray for highlighting
+            else:
+                self.hex_text.config(background="#ffffff", foreground="#000000")
+                offset_color = "#0000a0"    # Dark blue for offsets
+                hex_color = "#000000"       # Black for hex values
+                ascii_color = "#8b0000"     # Dark red for ASCII
+                separator_color = "#a9a9a9" # Dark gray for separators
+                highlight_color = "#f0f0f0" # Light gray for highlighting
             
-            # Create a frame for the listbox
-            list_frame = ttk.Frame(capture_selection)
-            list_frame.pack(pady=5, padx=15, fill=tk.BOTH, expand=True)
+            # Configure text tags
+            self.hex_text.tag_configure("offset", foreground=offset_color)
+            self.hex_text.tag_configure("hex", foreground=hex_color)
+            self.hex_text.tag_configure("ascii", foreground=ascii_color)
+            self.hex_text.tag_configure("separator", foreground=separator_color)
+            self.hex_text.tag_configure("highlight", background=highlight_color)
             
-            # Create a listbox with all capture files
-            listbox = tk.Listbox(list_frame, width=70, height=15, 
-                                font=("Segoe UI", 10),
-                                background="white", foreground="black",
-                                selectbackground="#0078D7", selectforeground="white")
-            listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            # Clear existing content and set a fixed-width font
+            self.hex_text.delete(1.0, tk.END)
+            self.hex_text.config(font=("Courier New", 10))
             
-            # Add scrollbar
-            scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=listbox.yview)
-            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-            listbox.configure(yscrollcommand=scrollbar.set)
+            # Get raw data from different possible sources to handle various packet formats
+            raw_data = None
             
-            # Add files to listbox
-            for capture in captures:
-                # Get file size and creation time for display
-                file_stat = os.stat(capture)
-                file_size = file_stat.st_size / 1024  # KB
-                file_time = datetime.fromtimestamp(file_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+            # Try multiple ways to get raw data
+            if 'raw' in packet and packet['raw']:
+                raw_data = packet['raw']
+            elif 'raw_data' in packet and packet['raw_data']:
+                raw_data = packet['raw_data']
+            elif 'bytes' in packet and packet['bytes']:
+                raw_data = packet['bytes']
+            elif 'protocol' in packet:
+                # Generate dummy data based on packet headers for common protocols
+                dummy_data = []
+                protocol = packet['protocol'].upper()
                 
-                # Add to listbox
-                listbox.insert(tk.END, f"{capture} ({file_size:.1f} KB, {file_time})")
-            
-            # Function to load the selected file
-            def load_selected_file():
-                selection = listbox.curselection()
-                if selection:
-                    # Get the filename from the selection (strip off size and time)
-                    selected_text = listbox.get(selection[0])
-                    selected_file = selected_text.split(' (')[0]
+                # Generate a basic dummy header based on protocol
+                if protocol == 'TCP':
+                    # Create TCP-like header with SYN/ACK flags, ports, etc.
+                    src_ip = packet.get('src_ip', '192.168.1.1')
+                    dst_ip = packet.get('dst_ip', '192.168.1.2')
+                    src_port = packet.get('src_port', '80')
+                    dst_port = packet.get('dst_port', '12345')
+                    tcp_flags = packet.get('tcp_flags', 'ACK')
                     
-                    # Set as current file
-                    self.current_csv = selected_file
+                    # IP version 4, header length 5, TOS 0
+                    dummy_data.append(0x45)  # Version 4, header length 5
+                    dummy_data.append(0x00)  # TOS
+                    dummy_data.append(0x00)  # Total length high byte
+                    dummy_data.append(0x28)  # Total length low byte (40 bytes)
                     
-                    # Update the display
-                    self.show_capture_results()
-                    self.view_csv_data()
+                    # ID, flags, fragment offset
+                    dummy_data.extend([0x00, 0x01, 0x40, 0x00])
                     
-                    # Close the dialog
-                    capture_selection.destroy()
-            
-            # Function to open the directory of the selected file
-            def open_file_dir():
-                selection = listbox.curselection()
-                if selection:
-                    # Get the filename from the selection
-                    selected_text = listbox.get(selection[0])
-                    selected_file = selected_text.split(' (')[0]
+                    # TTL, Protocol (TCP=6), Header checksum
+                    ttl = int(packet.get('ttl', 64))
+                    dummy_data.extend([ttl, 0x06, 0x00, 0x00])
                     
-                    # Get the absolute path
-                    abs_path = os.path.abspath(selected_file)
-                    dir_path = os.path.dirname(abs_path)
-                    
-                    # Open the directory
+                    # Source IP (convert to bytes)
                     try:
-                        if os.name == 'nt':  # Windows
-                            os.startfile(dir_path)
-                        elif os.name == 'darwin':  # macOS
-                            subprocess.call(['open', dir_path])
-                        else:  # Linux and other Unix
-                            subprocess.call(['xdg-open', dir_path])
-                    except Exception as e:
-                        messagebox.showerror("Error", f"Failed to open directory: {str(e)}")
-            
-            # Function to open the selected file directly
-            def open_selected_file():
-                selection = listbox.curselection()
-                if selection:
-                    # Get the filename from the selection
-                    selected_text = listbox.get(selection[0])
-                    selected_file = selected_text.split(' (')[0]
+                        src_ip_parts = [int(p) for p in src_ip.split('.')]
+                        dummy_data.extend(src_ip_parts[:4])
+                    except:
+                        dummy_data.extend([192, 168, 1, 1])
                     
-                    # Get the absolute path
-                    abs_path = os.path.abspath(selected_file)
-                    
-                    # Open the file
+                    # Destination IP (convert to bytes)
                     try:
-                        if os.name == 'nt':  # Windows
-                            os.startfile(abs_path)
+                        dst_ip_parts = [int(p) for p in dst_ip.split('.')]
+                        dummy_data.extend(dst_ip_parts[:4])
+                    except:
+                        dummy_data.extend([192, 168, 1, 2])
+                    
+                    # Source and destination ports
+                    try:
+                        src_port_int = int(src_port)
+                        dummy_data.append((src_port_int >> 8) & 0xFF)
+                        dummy_data.append(src_port_int & 0xFF)
+                    except:
+                        dummy_data.extend([0x00, 0x50])  # Default to port 80
+                        
+                    try:
+                        dst_port_int = int(dst_port)
+                        dummy_data.append((dst_port_int >> 8) & 0xFF)
+                        dummy_data.append(dst_port_int & 0xFF)
+                    except:
+                        dummy_data.extend([0x30, 0x39])  # Default to port 12345
+                    
+                    # Sequence and ack numbers
+                    dummy_data.extend([0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01])
+                    
+                    # TCP header length and flags
+                    dummy_data.append(0x50)  # Header length 5 * 4 = 20 bytes
+                    if 'SYN' in tcp_flags:
+                        dummy_data.append(0x02)  # SYN flag
+                    elif 'FIN' in tcp_flags:
+                        dummy_data.append(0x01)  # FIN flag
+                    else:
+                        dummy_data.append(0x10)  # ACK flag
+                    
+                    # Window size, checksum, urgent pointer
+                    dummy_data.extend([0x72, 0x10, 0x00, 0x00, 0x00, 0x00])
+                    
+                    # Add some data bytes for padding
+                    dummy_data.extend([0x44, 0x41, 0x54, 0x41])  # "DATA" in ASCII
+                
+                elif protocol == 'UDP':
+                    # Create UDP-like header
+                    src_ip = packet.get('src_ip', '192.168.1.1')
+                    dst_ip = packet.get('dst_ip', '192.168.1.2')
+                    src_port = packet.get('src_port', '53')
+                    dst_port = packet.get('dst_port', '12345')
+                    
+                    # IP header
+                    dummy_data.append(0x45)  # Version 4, header length 5
+                    dummy_data.append(0x00)  # TOS
+                    dummy_data.append(0x00)  # Total length high byte
+                    dummy_data.append(0x21)  # Total length low byte
+                    
+                    # Rest of IP header
+                    dummy_data.extend([0x00, 0x01, 0x40, 0x00, 0x40, 0x11, 0x00, 0x00])
+                    
+                    # Source and destination IP
+                    try:
+                        src_ip_parts = [int(p) for p in src_ip.split('.')]
+                        dummy_data.extend(src_ip_parts[:4])
+                    except:
+                        dummy_data.extend([192, 168, 1, 1])
+                    
+                    try:
+                        dst_ip_parts = [int(p) for p in dst_ip.split('.')]
+                        dummy_data.extend(dst_ip_parts[:4])
+                    except:
+                        dummy_data.extend([192, 168, 1, 2])
+                    
+                    # UDP header
+                    try:
+                        src_port_int = int(src_port)
+                        dummy_data.append((src_port_int >> 8) & 0xFF)
+                        dummy_data.append(src_port_int & 0xFF)
+                    except:
+                        dummy_data.extend([0x00, 0x35])  # Default to port 53
+                        
+                    try:
+                        dst_port_int = int(dst_port)
+                        dummy_data.append((dst_port_int >> 8) & 0xFF)
+                        dummy_data.append(dst_port_int & 0xFF)
+                    except:
+                        dummy_data.extend([0x30, 0x39])  # Default to port 12345
+                    
+                    # Length and checksum
+                    dummy_data.extend([0x00, 0x0d, 0x00, 0x00])
+                    
+                    # Data
+                    dummy_data.extend([0x44, 0x41, 0x54, 0x41])  # "DATA" in ASCII
+                
+                elif protocol == 'ICMP':
+                    # Create ICMP-like header
+                    src_ip = packet.get('src_ip', '192.168.1.1')
+                    dst_ip = packet.get('dst_ip', '192.168.1.2')
+                    icmp_type = packet.get('icmp_type', '8')  # Echo request
+                    
+                    # IP header
+                    dummy_data.append(0x45)  # Version 4, header length 5
+                    dummy_data.append(0x00)  # TOS
+                    dummy_data.append(0x00)  # Total length high byte
+                    dummy_data.append(0x3c)  # Total length low byte
+                    
+                    # Rest of IP header
+                    dummy_data.extend([0x00, 0x01, 0x00, 0x00, 0x40, 0x01, 0x00, 0x00])
+                    
+                    # Source and destination IP
+                    try:
+                        src_ip_parts = [int(p) for p in src_ip.split('.')]
+                        dummy_data.extend(src_ip_parts[:4])
+                    except:
+                        dummy_data.extend([192, 168, 1, 1])
+                    
+                    try:
+                        dst_ip_parts = [int(p) for p in dst_ip.split('.')]
+                        dummy_data.extend(dst_ip_parts[:4])
+                    except:
+                        dummy_data.extend([192, 168, 1, 2])
+                    
+                    # ICMP header
+                    try:
+                        icmp_type_int = int(icmp_type)
+                        dummy_data.append(icmp_type_int)
+                    except:
+                        dummy_data.append(0x08)  # Echo request
+                    
+                    dummy_data.append(0x00)  # Code
+                    dummy_data.extend([0x00, 0x00])  # Checksum
+                    dummy_data.extend([0x00, 0x01, 0x00, 0x01])  # Identifier and sequence
+                    
+                    # Data
+                    for i in range(32):
+                        dummy_data.append((i % 26) + 97)  # Data pattern (a-z)
+                
+                else:
+                    # Generic dummy data with header pattern
+                    for i in range(64):
+                        dummy_data.append(i)
+                
+                raw_data = dummy_data
+            
+            # Generate sample data if nothing is available
+            if not raw_data:
+                # Create sample data that shows packet structure
+                if self.debug_mode:
+                    self._log_debug("No raw data available, generating sample data")
+                
+                # Create a sample of 128 bytes with a recognizable pattern
+                raw_data = []
+                
+                # Ethernet header (14 bytes)
+                raw_data.extend([0xff, 0xff, 0xff, 0xff, 0xff, 0xff])  # Destination MAC
+                raw_data.extend([0x00, 0x11, 0x22, 0x33, 0x44, 0x55])  # Source MAC
+                raw_data.extend([0x08, 0x00])  # EtherType (IPv4)
+                
+                # IP header (20 bytes)
+                raw_data.append(0x45)  # Version 4, header length 5
+                raw_data.append(0x00)  # TOS
+                raw_data.extend([0x00, 0x73])  # Total length
+                raw_data.extend([0x00, 0x00])  # Identification
+                raw_data.extend([0x40, 0x00])  # Flags, fragment offset
+                raw_data.append(0x40)  # TTL
+                raw_data.append(0x06)  # Protocol (TCP)
+                raw_data.extend([0x00, 0x00])  # Header checksum
+                raw_data.extend([192, 168, 1, 1])  # Source IP
+                raw_data.extend([192, 168, 1, 2])  # Destination IP
+                
+                # TCP header (20 bytes)
+                raw_data.extend([0x00, 0x50])  # Source port (80)
+                raw_data.extend([0x12, 0x34])  # Destination port (4660)
+                raw_data.extend([0x00, 0x00, 0x00, 0x01])  # Sequence number
+                raw_data.extend([0x00, 0x00, 0x00, 0x00])  # Acknowledgment number
+                raw_data.append(0x50)  # Data offset, reserved
+                raw_data.append(0x18)  # Flags (PSH, ACK)
+                raw_data.extend([0x01, 0x00])  # Window size
+                raw_data.extend([0x00, 0x00])  # Checksum
+                raw_data.extend([0x00, 0x00])  # Urgent pointer
+                
+                # Payload - sample HTTP request
+                http_request = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
+                for c in http_request:
+                    raw_data.append(ord(c))
+                
+                # Pad to at least 64 bytes
+                while len(raw_data) < 64:
+                    raw_data.append(0x00)
+            
+            if not raw_data:
+                self.hex_text.insert(tk.END, "No raw data available for this packet\n")
+                self.hex_text.insert(tk.END, "This is likely because the packet was generated without raw data capture enabled.\n")
+                self.hex_text.insert(tk.END, "Try capturing new packets with the latest version of the application.")
+                return
+            
+            # Convert to bytes if needed
+            try:
+                if isinstance(raw_data, list):
+                    # Use the list directly
+                    raw_bytes = raw_data
+                elif isinstance(raw_data, str):
+                    # Try to parse the string
+                    if raw_data.startswith('[') and raw_data.endswith(']'):
+                        # It might be a string representation of a list
+                        try:
+                            import ast
+                            raw_bytes = ast.literal_eval(raw_data)
+                            if not isinstance(raw_bytes, list):
+                                raw_bytes = [ord(c) for c in raw_data]
+                        except:
+                            raw_bytes = [ord(c) for c in raw_data]
+                    else:
+                        # Treat as a regular string
+                        raw_bytes = [ord(c) for c in raw_data]
+                elif hasattr(raw_data, '__iter__') and not isinstance(raw_data, (str, dict)):
+                    # It's some other iterable, convert to list
+                    raw_bytes = list(raw_data)
+                else:
+                    # Unknown format, try string representation
+                    raw_bytes = [ord(c) for c in str(raw_data)]
+                    
+                if not raw_bytes:
+                    self.hex_text.insert(tk.END, "Unable to parse raw data for this packet")
+                    return
+                
+                # Add a header row (Wireshark-style)
+                header = "    "
+                for i in range(16):
+                    header += f"{i:02x} "
+                    if i == 7:
+                        header += " "
+                header += "  "
+                ascii_header = "0123456789abcdef"
+                self.hex_text.insert(tk.END, f"{header}|{ascii_header}|\n", "separator")
+                self.hex_text.insert(tk.END, f"{'-'*70}\n", "separator")
+                
+                # Display the hex dump in 16-byte rows
+                offset = 0
+                while offset < len(raw_bytes):
+                    # Get current line bytes (up to 16)
+                    line_bytes = raw_bytes[offset:offset+16]
+                    
+                    # Format the line with offset
+                    line_offset = f"{offset:04x}  "
+                    self.hex_text.insert(tk.END, line_offset, "offset")
+                    
+                    # Format hex display with middle separator
+                    hex_display = ""
+                    for i, b in enumerate(line_bytes):
+                        if isinstance(b, int):
+                            hex_display += f"{b:02x} "
                         else:
-                            subprocess.call(['xdg-open', abs_path])
-                    except Exception as e:
-                        messagebox.showerror("Error", f"Failed to open file: {str(e)}")
-            
-            # Add buttons
-            button_frame = ttk.Frame(capture_selection)
-            button_frame.pack(pady=15)
-            
-            ttk.Button(button_frame, text="Load Selected", 
-                      command=load_selected_file, width=15).pack(side=tk.LEFT, padx=10)
-            
-            ttk.Button(button_frame, text="Open File", 
-                      command=open_selected_file, width=15).pack(side=tk.LEFT, padx=10)
-                      
-            ttk.Button(button_frame, text="Open Directory", 
-                      command=open_file_dir, width=15).pack(side=tk.LEFT, padx=10)
-            
-            ttk.Button(button_frame, text="Cancel", 
-                      command=capture_selection.destroy, width=15).pack(side=tk.LEFT, padx=10)
+                            try:
+                                hex_display += f"{ord(b):02x} "
+                            except:
+                                hex_display += "?? "
+                        
+                        # Add extra space after 8 bytes
+                        if i == 7:
+                            hex_display += " "
+                    
+                    # Pad if less than 16 bytes
+                    padding = 16 - len(line_bytes)
+                    hex_display += "   " * padding
+                    if padding > 8:
+                        hex_display += " "  # Extra space for the middle divider
+                        
+                    self.hex_text.insert(tk.END, hex_display, "hex")
+                    
+                    # Add separator between hex and ASCII
+                    self.hex_text.insert(tk.END, " |", "separator")
+                    
+                    # Format ASCII display
+                    for b in line_bytes:
+                        if isinstance(b, int) and 32 <= b <= 126:
+                            char = chr(b)
+                            self.hex_text.insert(tk.END, char, "ascii")
+                        elif not isinstance(b, int) and isinstance(b, str) and len(b) == 1:
+                            ord_val = ord(b)
+                            if 32 <= ord_val <= 126:
+                                self.hex_text.insert(tk.END, b, "ascii")
+                            else:
+                                self.hex_text.insert(tk.END, ".", "ascii")
+                        else:
+                            self.hex_text.insert(tk.END, ".", "ascii")
+                    
+                    # Add padding for incomplete lines
+                    if len(line_bytes) < 16:
+                        self.hex_text.insert(tk.END, " " * (16 - len(line_bytes)), "ascii")
+                    
+                    # Close ASCII section
+                    self.hex_text.insert(tk.END, "|\n", "separator")
+                    
+                    # Move to next line
+                    offset += 16
+                    
+            except Exception as e:
+                self.hex_text.insert(tk.END, f"Error parsing raw data: {str(e)}")
+                if self.debug_mode:
+                    self._log_debug(f"Error parsing packet raw data: {str(e)}")
+                    import traceback
+                    self._log_debug(traceback.format_exc())
             
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to list capture files: {str(e)}")
-    
-    def create_temp_capture_file(self):
-        """Create an empty capture file to ensure we have something to read from"""
-        try:
-            # Create a temporary capture file with headers
-            temp_file = "temp_capture.csv"
-            with open(temp_file, 'w', newline='') as f:
-                writer = csv.writer(f)
-                # Write headers that match what the sniffer.py would produce
-                writer.writerow([
-                    'timestamp', 'source_mac', 'destination_mac', 'source_ip', 'destination_ip', 
-                    'protocol', 'length', 'source_port', 'destination_port', 'packet_direction'
-                ])
-            print(f"Created temporary capture file: {temp_file}")
-            self.current_csv = os.path.abspath(temp_file)
-        except Exception as e:
-            print(f"Error creating temporary capture file: {e}")
+            self.hex_text.delete(1.0, tk.END)
+            self.hex_text.insert(tk.END, f"Error displaying hex view: {str(e)}")
+            if self.debug_mode:
+                import traceback
+                self._log_debug(f"Error in _display_hex_view: {str(e)}")
+                self._log_debug(traceback.format_exc())
 
-def main():
-    # Use regular Tk
-    root = tk.Tk()
+    def _apply_theme(self):
+        """Apply the current theme to the UI"""
+        theme = self.themes[self.current_theme]
+        
+        # Configure root and common styles
+        self.root.config(bg=theme["bg"])
+        
+        # Create a custom ttk style
+        style = ttk.Style()
+        
+        # Configure ttk themes
+        if self.current_theme == "dark":
+            # Try to use a pre-defined dark theme if available
+            try:
+                style.theme_use("clam")  # "clam" is more customizable
+            except:
+                pass
+        else:
+            # Try to use default theme for light mode
+            try:
+                style.theme_use("vista" if sys.platform == "win32" else "clam")
+            except:
+                pass
+        
+        # Configure ttk styles
+        style.configure("TFrame", background=theme["bg"])
+        style.configure("TLabel", background=theme["bg"], foreground=theme["fg"])
+        style.configure("TButton", background=theme["button_bg"], foreground=theme["button_fg"])
+        style.configure("TEntry", fieldbackground=theme["text_bg"], foreground=theme["text_fg"])
+        style.configure("TCombobox", fieldbackground=theme["text_bg"], foreground=theme["text_fg"])
+        style.configure("TNotebook", background=theme["bg"], tabmargins=[2, 5, 2, 0])
+        style.configure("TNotebook.Tab", background=theme["button_bg"], foreground=theme["button_fg"], padding=[10, 2])
+        
+        # Prevent hover color change by setting the same colors for all states
+        style.map("TButton",
+                 background=[("active", theme["button_bg"]), 
+                            ("pressed", theme["button_bg"]),
+                            ("hover", theme["button_bg"])],
+                 foreground=[("active", theme["button_fg"]),
+                            ("pressed", theme["button_fg"]),
+                            ("hover", theme["button_fg"])])
+        
+        style.map("TNotebook.Tab", 
+                  background=[("selected", theme["highlight_bg"]),
+                             ("active", theme["highlight_bg"])],
+                  foreground=[("selected", theme["highlight_fg"]),
+                             ("active", theme["highlight_fg"])])
+        
+        # Configure Treeview (packet list)
+        style.configure("Treeview", 
+                       background=theme["text_bg"], 
+                       foreground=theme["text_fg"],
+                       fieldbackground=theme["text_bg"])
+        style.configure("Treeview.Heading", 
+                       background=theme["header_bg"], 
+                       foreground=theme["header_fg"])
+        
+        # Prevent hover color change in Treeview
+        style.map("Treeview", 
+                 background=[("selected", theme["highlight_bg"]),
+                            ("active", theme["text_bg"])],
+                 foreground=[("selected", theme["highlight_fg"]),
+                            ("active", theme["text_fg"])])
+        
+        # Configure text widgets
+        text_widgets = [self.details_text, self.summary_text, self.raw_text, self.hex_text]
+        for widget in text_widgets:
+            widget.config(
+                background=theme["text_bg"],
+                foreground=theme["text_fg"],
+                insertbackground=theme["text_fg"]
+            )
+        
+        # Configure the canvas background
+        if hasattr(self, 'protocol_canvas'):
+            self.protocol_canvas.config(bg=theme["text_bg"])
+        
+        # Update text display colors
+        self.details_text.tag_configure("header", foreground="#0066cc" if self.current_theme == "light" else "#66b3ff")
+        self.details_text.tag_configure("field", foreground="#007700" if self.current_theme == "light" else "#99ff99")
+        self.details_text.tag_configure("value", foreground=theme["text_fg"])
+        
+        # Configure protocol tags only if packet_tree exists
+        if hasattr(self, 'packet_tree'):
+            self._configure_protocol_tags()
+
+    def toggle_theme(self):
+        """Toggle between light and dark theme"""
+        if self.current_theme == "light":
+            self.current_theme = "dark"
+            self.theme_var.set("Light Mode")  # Shows what mode will be activated on next click
+        else:
+            self.current_theme = "light"
+            self.theme_var.set("Dark Mode")   # Shows what mode will be activated on next click
+        
+        self._apply_theme()
+
+    def _create_settings_content(self):
+        """Create the settings tab content."""
+        settings_frame = ttk.Frame(self.settings_tab)
+        settings_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Network Interface Selection
+        interface_frame = ttk.LabelFrame(settings_frame, text="Network Interface")
+        interface_frame.pack(fill="x", padx=5, pady=5)
+        
+        # Get list of available interfaces
+        self.interfaces = self._get_interfaces()
+        interface_options = [f"{iface['name']} ({iface['description']})" for iface in self.interfaces]
+        
+        # Interface dropdown
+        self.interface_var = tk.StringVar()
+        interface_dropdown = ttk.Combobox(interface_frame, textvariable=self.interface_var)
+        interface_dropdown['values'] = interface_options
+        interface_dropdown.pack(fill="x", padx=5, pady=5)
+        if interface_options:
+            interface_dropdown.current(0)
+        
+        # Refresh interfaces button
+        refresh_btn = ttk.Button(interface_frame, text="Refresh Interfaces", command=self._refresh_interfaces)
+        refresh_btn.pack(fill="x", padx=5, pady=5)
+        
+        # Capture Settings
+        capture_frame = ttk.LabelFrame(settings_frame, text="Capture Settings")
+        capture_frame.pack(fill="x", padx=5, pady=5)
+        
+        # Packet count
+        packet_count_frame = ttk.Frame(capture_frame)
+        packet_count_frame.pack(fill="x", padx=5, pady=5)
+        ttk.Label(packet_count_frame, text="Packet Count:").pack(side="left")
+        self.packet_count_var = tk.StringVar(value="0")
+        ttk.Entry(packet_count_frame, textvariable=self.packet_count_var).pack(side="right", expand=True, fill="x")
+        
+        # Timeout
+        timeout_frame = ttk.Frame(capture_frame)
+        timeout_frame.pack(fill="x", padx=5, pady=5)
+        ttk.Label(timeout_frame, text="Timeout (seconds):").pack(side="left")
+        self.timeout_var = tk.StringVar(value="60")
+        ttk.Entry(timeout_frame, textvariable=self.timeout_var).pack(side="right", expand=True, fill="x")
+        
+        # Output directory
+        output_dir_frame = ttk.Frame(capture_frame)
+        output_dir_frame.pack(fill="x", padx=5, pady=5)
+        ttk.Label(output_dir_frame, text="Output Directory:").pack(side="left")
+        self.output_dir_var = tk.StringVar(value=os.path.join(os.path.dirname(os.path.abspath(__file__)), "captures"))
+        ttk.Entry(output_dir_frame, textvariable=self.output_dir_var).pack(side="left", expand=True, fill="x")
+        ttk.Button(output_dir_frame, text="Browse", command=self._browse_output_dir).pack(side="right")
+        
+        # Simulation mode checkbox
+        simulation_frame = ttk.Frame(capture_frame)
+        simulation_frame.pack(fill="x", padx=5, pady=5)
+        self.simulation_mode_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(simulation_frame, text="Simulation Mode (generate test data)", variable=self.simulation_mode_var).pack(anchor="w")
+        
+        # Action buttons
+        button_frame = ttk.Frame(settings_frame)
+        button_frame.pack(fill="x", padx=5, pady=10)
+        
+        self.start_button = ttk.Button(button_frame, text="Start Capture", command=self._run_capture)
+        self.start_button.pack(side="left", fill="x", expand=True, padx=5)
+        
+        self.stop_button = ttk.Button(button_frame, text="Stop Capture", command=self._stop_capture, state="disabled")
+        self.stop_button.pack(side="right", fill="x", expand=True, padx=5)
+
+    def _open_capture(self):
+        """Open a saved capture file"""
+        from tkinter import filedialog
+        filename = filedialog.askopenfilename(
+            title="Open Capture File",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if filename:
+            try:
+                self._load_packets_from_csv(filename)
+                self.status_label.config(text=f"Loaded capture file: {os.path.basename(filename)}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to open capture file: {str(e)}")
     
-    # Set window icon
-    try:
-        root.iconbitmap("network.ico")  # You would need to add this icon file
-    except:
-        pass  # If icon not found, use default
+    def _save_capture(self):
+        """Save the current capture to a file"""
+        if not self.all_packets:
+            messagebox.showinfo("Info", "No packets to save")
+            return
+            
+        from tkinter import filedialog
+        filename = filedialog.asksaveasfilename(
+            title="Save Capture As",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if not filename:
+            return
+            
+        try:
+            with open(filename, 'w', newline='') as f:
+                writer = csv.writer(f)
+                # Write header
+                writer.writerow([
+                    'timestamp', 'source_mac', 'destination_mac', 'source_ip', 'destination_ip',
+                    'protocol', 'length', 'source_port', 'destination_port', 'ttl',
+                    'tcp_flags', 'tcp_window', 'icmp_type', 'icmp_code', 'dns_query',
+                    'http_method', 'http_host', 'http_path', 'packet_direction', 'raw_data'
+                ])
+                
+                # Write packet data
+                for packet in self.all_packets:
+                    writer.writerow([
+                        packet.get('timestamp', ''),
+                        packet.get('src_mac', ''),
+                        packet.get('dst_mac', ''),
+                        packet.get('src_ip', ''),
+                        packet.get('dst_ip', ''),
+                        packet.get('protocol', ''),
+                        packet.get('length', ''),
+                        packet.get('src_port', ''),
+                        packet.get('dst_port', ''),
+                        packet.get('ttl', ''),
+                        packet.get('tcp_flags', ''),
+                        packet.get('tcp_window', ''),
+                        packet.get('icmp_type', ''),
+                        packet.get('icmp_code', ''),
+                        packet.get('dns_query', ''),
+                        packet.get('http_method', ''),
+                        packet.get('http_host', ''),
+                        packet.get('http_path', ''),
+                        packet.get('packet_direction', ''),
+                        str(packet.get('raw', ''))
+                    ])
+                
+            self.status_label.config(text=f"Saved capture to: {os.path.basename(filename)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save capture file: {str(e)}")
+
+    def _load_packets_from_csv(self, csv_file):
+        """Load packets from a CSV file into the GUI"""
+        if not os.path.exists(csv_file):
+            if self.debug_mode:
+                self._log_debug(f"CSV file not found: {csv_file}")
+            raise FileNotFoundError(f"CSV file not found: {csv_file}")
+            
+        try:
+            if self.debug_mode:
+                self._log_debug(f"Loading packets from CSV file: {csv_file}")
+                
+            # Clear existing packets
+            self.all_packets = []
+            self.packet_tree.delete(*self.packet_tree.get_children())
+            self.details_text.delete(1.0, tk.END)
+            self.raw_text.delete(1.0, tk.END)
+            self.hex_text.delete(1.0, tk.END)
+            
+            # Configure protocol tags
+            self._configure_protocol_tags()
+            
+            # Read CSV file
+            with open(csv_file, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                
+                # Read header row
+                try:
+                    header = next(reader, None)
+                    if self.debug_mode:
+                        self._log_debug(f"CSV header: {header}")
+                except Exception as e:
+                    if self.debug_mode:
+                        self._log_debug(f"Error reading CSV header: {str(e)}")
+                    header = []
+                
+                if not header:
+                    if self.debug_mode:
+                        self._log_debug("CSV file is empty or has no header row")
+                    raise ValueError("CSV file is empty or has no header row")
+                    
+                # Create mapping of column names to indices
+                col_idx = {}
+                # Standard field mappings with fallbacks for different naming conventions
+                field_mappings = {
+                    'timestamp': ['timestamp', 'time', 'Timestamp', 'Time'],
+                    'src_mac': ['source_mac', 'src_mac', 'source mac', 'Source MAC', 'source_MAC'],
+                    'dst_mac': ['destination_mac', 'dst_mac', 'destination mac', 'Destination MAC', 'destination_MAC'],
+                    'src_ip': ['source_ip', 'src_ip', 'source ip', 'Source IP', 'src_IP'],
+                    'dst_ip': ['destination_ip', 'dst_ip', 'destination ip', 'Destination IP', 'dst_IP'],
+                    'src_port': ['source_port', 'src_port', 'source port', 'Source Port'],
+                    'dst_port': ['destination_port', 'dst_port', 'destination port', 'Destination Port'],
+                    'protocol': ['protocol', 'Protocol', 'proto', 'Proto'],
+                    'length': ['length', 'len', 'size', 'Length', 'Size'],
+                    'ttl': ['ttl', 'time to live', 'TTL', 'Time to Live'],
+                    'tcp_flags': ['tcp_flags', 'flags', 'TCP Flags', 'Flags'],
+                    'tcp_window': ['tcp_window', 'window', 'TCP Window', 'Window Size'],
+                    'icmp_type': ['icmp_type', 'ICMP Type', 'icmp type'],
+                    'icmp_code': ['icmp_code', 'ICMP Code', 'icmp code'],
+                    'dns_query': ['dns_query', 'DNS Query', 'dns query', 'query'],
+                    'http_method': ['http_method', 'HTTP Method', 'http method', 'method'],
+                    'http_host': ['http_host', 'HTTP Host', 'http host', 'host'],
+                    'http_path': ['http_path', 'HTTP Path', 'http path', 'path'],
+                    'packet_direction': ['packet_direction', 'direction', 'Direction'],
+                    'raw_data': ['raw_data', 'raw', 'Raw Data', 'Raw']
+                }
+                
+                # Determine actual column indices for each field
+                for field, possible_names in field_mappings.items():
+                    for name in possible_names:
+                        if name in header:
+                            col_idx[field] = header.index(name)
+                            break
+                
+                if self.debug_mode:
+                    self._log_debug(f"Column index mapping: {col_idx}")
+                
+                # Helper function to safely get column value
+                def get_col_value(row, field):
+                    if field in col_idx and col_idx[field] < len(row):
+                        return row[col_idx[field]]
+                    return ""
+                
+                # Count of packets in the CSV
+                packet_count = 0
+                
+                # Load each row
+                for row_idx, row in enumerate(reader, 1):
+                    if not row:
+                        continue
+                    
+                    if self.debug_mode and row_idx == 1:
+                        self._log_debug(f"First row of data: {row}")
+                        
+                    # Extract packet data from CSV
+                    packet_data = {
+                        'id': row_idx,
+                        'timestamp': get_col_value(row, 'timestamp'),
+                        'src_mac': get_col_value(row, 'src_mac'),
+                        'dst_mac': get_col_value(row, 'dst_mac'),
+                        'src_ip': get_col_value(row, 'src_ip'),
+                        'dst_ip': get_col_value(row, 'dst_ip'),
+                        'src_port': get_col_value(row, 'src_port'),
+                        'dst_port': get_col_value(row, 'dst_port'),
+                        'protocol': get_col_value(row, 'protocol'),
+                        'length': get_col_value(row, 'length'),
+                        'ttl': get_col_value(row, 'ttl'),
+                        'tcp_flags': get_col_value(row, 'tcp_flags'),
+                        'tcp_window': get_col_value(row, 'tcp_window'),
+                        'icmp_type': get_col_value(row, 'icmp_type'),
+                        'icmp_code': get_col_value(row, 'icmp_code'),
+                        'dns_query': get_col_value(row, 'dns_query'),
+                        'http_method': get_col_value(row, 'http_method'),
+                        'http_host': get_col_value(row, 'http_host'),
+                        'http_path': get_col_value(row, 'http_path'),
+                        'packet_direction': get_col_value(row, 'packet_direction'),
+                        'raw': get_col_value(row, 'raw_data')
+                    }
+                    
+                    # Construct info field if not present
+                    packet_data['info'] = ''
+                    if packet_data['protocol'] == 'TCP' or packet_data['protocol'] == 'UDP':
+                        if packet_data['src_ip'] and packet_data['dst_ip']:
+                            packet_data['info'] = f"{packet_data['src_ip']}:{packet_data['src_port']} → {packet_data['dst_ip']}:{packet_data['dst_port']}"
+                    elif packet_data['protocol'] == 'ICMP':
+                        if packet_data['src_ip'] and packet_data['dst_ip']:
+                            packet_data['info'] = f"ICMP {packet_data['src_ip']} → {packet_data['dst_ip']}"
+                    elif packet_data['protocol'] == 'ARP':
+                        if packet_data['src_ip'] and packet_data['dst_ip']:
+                            packet_data['info'] = f"Who has {packet_data['dst_ip']}? Tell {packet_data['src_ip']}"
+                    elif packet_data['protocol'] == 'DNS':
+                        if packet_data['dns_query']:
+                            packet_data['info'] = f"Query: {packet_data['dns_query']}"
+                    elif packet_data['protocol'] == 'HTTP':
+                        if packet_data['http_method'] and packet_data['http_path']:
+                            packet_data['info'] = f"{packet_data['http_method']} {packet_data['http_path']}"
+                            if packet_data['http_host']:
+                                packet_data['info'] += f" Host: {packet_data['http_host']}"
+                    elif packet_data['src_ip'] and packet_data['dst_ip']:
+                        packet_data['info'] = f"{packet_data['src_ip']} → {packet_data['dst_ip']}"
+                    
+                    # Add to packet list
+                    self.all_packets.append(packet_data)
+                    
+                    # Add to tree view
+                    protocol_tag = self._get_protocol_tag(packet_data['protocol'])
+                    self.packet_tree.insert("", tk.END, values=(
+                        packet_data['id'],
+                        packet_data['timestamp'],
+                        packet_data['src_mac'],
+                        packet_data['dst_mac'],
+                        packet_data['src_ip'],
+                        packet_data['dst_ip'],
+                        packet_data['src_port'],
+                        packet_data['dst_port'],
+                        packet_data['protocol'],
+                        packet_data['length'],
+                        packet_data['ttl'],
+                        packet_data['tcp_flags'],
+                        packet_data['tcp_window'],
+                        packet_data['packet_direction'],
+                        packet_data['info']
+                    ), tags=(protocol_tag,))
+                    
+                    # Update raw data tab (only for first 1000 packets)
+                    if row_idx <= 1000:
+                        # Create a simulated raw data string from packet values
+                        raw_data = ", ".join([
+                            packet_data['timestamp'], packet_data['src_mac'], packet_data['dst_mac'],
+                            packet_data['src_ip'], packet_data['dst_ip'], packet_data['protocol'],
+                            packet_data['length'], packet_data['src_port'], packet_data['dst_port']
+                        ])
+                        self.raw_text.insert(tk.END, f"{row_idx}: {raw_data}\n")
+                    
+                    packet_count += 1
+                
+                if self.debug_mode:
+                    self._log_debug(f"Loaded {packet_count} packets from CSV file")
+                
+                # Update hex view dropdown
+                packet_ids = [str(p['id']) for p in self.all_packets[-100:]]  # Last 100 packets
+                self.hex_packet_var.set(packet_ids[-1] if packet_ids else "")
+                self.hex_packet_dropdown['values'] = packet_ids
+                
+                # Update status
+                self.status_label.config(text=f"Loaded {len(self.all_packets)} packets from {os.path.basename(csv_file)}")
+                
+                # Manual creation of stats object if we don't have one
+                if not self.stats or not isinstance(self.stats, dict) or not self.stats.get('total_packets'):
+                    # Create stats based on the loaded packets
+                    self.stats = {
+                        'total_packets': len(self.all_packets),
+                        'tcp_packets': sum(1 for p in self.all_packets if p['protocol'] == 'TCP'),
+                        'udp_packets': sum(1 for p in self.all_packets if p['protocol'] == 'UDP'),
+                        'icmp_packets': sum(1 for p in self.all_packets if p['protocol'] == 'ICMP'),
+                        'other_packets': sum(1 for p in self.all_packets if p['protocol'] not in ['TCP', 'UDP', 'ICMP']),
+                        'duration': 0,
+                        'top_ips': {},
+                        'top_destinations': {},
+                        'top_ports': {}
+                    }
+                    
+                    # Calculate top IPs, destinations, and ports
+                    for p in self.all_packets:
+                        if p['src_ip']:
+                            self.stats['top_ips'][p['src_ip']] = self.stats['top_ips'].get(p['src_ip'], 0) + 1
+                        if p['dst_ip']:
+                            self.stats['top_destinations'][p['dst_ip']] = self.stats['top_destinations'].get(p['dst_ip'], 0) + 1
+                        if p['src_port']:
+                            self.stats['top_ports'][p['src_port']] = self.stats['top_ports'].get(p['src_port'], 0) + 1
+                        if p['dst_port']:
+                            self.stats['top_ports'][p['dst_port']] = self.stats['top_ports'].get(p['dst_port'], 0) + 1
+                
+                return True
+                
+        except Exception as e:
+            if self.debug_mode:
+                self._log_debug(f"Error loading CSV: {str(e)}")
+                import traceback
+                self._log_debug(traceback.format_exc())
+            raise Exception(f"Error loading CSV: {str(e)}")
+
+    def stop_capture(self):
+        """Stop the current packet capture"""
+        if not self.capture_in_progress:
+            return
+            
+        if self.debug_mode:
+            self._log_debug("Stopping capture...")
+            
+        # Set the stop flag for the capture thread
+        if hasattr(self, 'stop_capture_event'):
+            self.stop_capture_event.set()
+            
+        # Update UI state
+        self.status_label.config(text="Stopping capture...")
+        self.capture_in_progress = False
+        self.start_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.DISABLED)
+        
+        # Wait for capture thread to finish if it's still running
+        if self.capture_thread and self.capture_thread.is_alive():
+            try:
+                # Give the capture thread a moment to react to the stop event
+                time.sleep(0.5)
+                self.capture_thread.join(timeout=1.0)  # Wait up to 1 second
+            except:
+                pass  # Ignore any thread joining errors
+
+    def _show_about(self):
+        """Show the about dialog"""
+        messagebox.showinfo("About", "Network Sniffer\nVersion 1.0\n\nA network packet capture and analysis tool")
+
+    def _on_packet_select(self, event):
+        """Handle packet selection event"""
+        selected = self.packet_tree.selection()
+        if not selected:
+            return
+        
+        # Get selected item values
+        item_id = selected[0]
+        values = self.packet_tree.item(item_id, "values")
+        
+        # Find the packet in our all_packets list to access all fields
+        packet_id = int(values[0])
+        packet = None
+        for p in self.all_packets:
+            if p['id'] == packet_id:
+                packet = p
+                break
+        
+        if not packet:
+            return
+        
+        # Display packet details
+        self.details_text.delete(1.0, tk.END)
+        
+        # Format details with syntax highlighting using tags
+        self.details_text.tag_configure("header", foreground="blue", font=("Courier", 10, "bold"))
+        self.details_text.tag_configure("field", foreground="green")
+        self.details_text.tag_configure("value", foreground="black")
+        
+        # Frame details
+        self.details_text.insert(tk.END, "FRAME INFO\n", "header")
+        self.details_text.insert(tk.END, f"  {'Packet Number:':<20}", "field")
+        self.details_text.insert(tk.END, f"{packet['id']}\n", "value")
+        self.details_text.insert(tk.END, f"  {'Timestamp:':<20}", "field")
+        self.details_text.insert(tk.END, f"{packet['timestamp']}\n", "value")
+        self.details_text.insert(tk.END, f"  {'Frame Length:':<20}", "field")
+        self.details_text.insert(tk.END, f"{packet['length']} bytes\n\n", "value")
+        
+        # MAC addresses
+        self.details_text.insert(tk.END, "ETHERNET LAYER\n", "header")
+        self.details_text.insert(tk.END, f"  {'Source MAC:':<20}", "field")
+        self.details_text.insert(tk.END, f"{packet['src_mac']}\n", "value")
+        self.details_text.insert(tk.END, f"  {'Destination MAC:':<20}", "field")
+        self.details_text.insert(tk.END, f"{packet['dst_mac']}\n\n", "value")
+        
+        # Protocol
+        protocol = packet['protocol'].upper()
+        self.details_text.insert(tk.END, f"{protocol} PROTOCOL\n", "header")
+        
+        # IP Layer
+        self.details_text.insert(tk.END, f"  {'Source IP:':<20}", "field")
+        self.details_text.insert(tk.END, f"{packet['src_ip']}\n", "value")
+        self.details_text.insert(tk.END, f"  {'Destination IP:':<20}", "field")
+        self.details_text.insert(tk.END, f"{packet['dst_ip']}\n", "value")
+        
+        # TTL if available
+        if packet['ttl']:
+            self.details_text.insert(tk.END, f"  {'TTL:':<20}", "field")
+            self.details_text.insert(tk.END, f"{packet['ttl']}\n", "value")
+        
+        # Direction if available
+        if packet.get('packet_direction'):
+            self.details_text.insert(tk.END, f"  {'Direction:':<20}", "field")
+            self.details_text.insert(tk.END, f"{packet['packet_direction']}\n", "value")
+        
+        # Additional protocol-specific info
+        if protocol == "TCP":
+            self._add_tcp_details(packet)
+        elif protocol == "UDP":
+            self._add_udp_details(packet)
+        elif protocol == "ICMP":
+            self._add_icmp_details(packet)
+        elif "DNS" in protocol or packet.get('dns_query'):
+            self._add_dns_details(packet)
+        elif "HTTP" in protocol or packet.get('http_method') or packet.get('http_host') or packet.get('http_path'):
+            self._add_http_details(packet)
+        
+        # Add info field
+        self.details_text.insert(tk.END, "\nINFO\n", "header")
+        self.details_text.insert(tk.END, f"  {packet.get('info', '')}\n", "value")
+        
+        # Also display the hex view for this packet
+        try:
+            self.hex_packet_var.set(str(packet_id))
+            self._display_hex_view()
+        except:
+            pass
+
+    def _add_tcp_details(self, packet):
+        """Add TCP-specific details to packet details"""
+        # Add TCP ports
+        self.details_text.insert(tk.END, "\nTCP DETAILS\n", "header")
+        
+        if packet.get('src_port'):
+            self.details_text.insert(tk.END, f"  {'Source Port:':<20}", "field")
+            self.details_text.insert(tk.END, f"{packet['src_port']}\n", "value")
+        
+        if packet.get('dst_port'):
+            self.details_text.insert(tk.END, f"  {'Destination Port:':<20}", "field")
+            self.details_text.insert(tk.END, f"{packet['dst_port']}\n", "value")
+        
+        # TCP flags if available
+        if packet.get('tcp_flags'):
+            self.details_text.insert(tk.END, f"  {'TCP Flags:':<20}", "field")
+            self.details_text.insert(tk.END, f"{packet['tcp_flags']}\n", "value")
+        
+        # TCP window if available
+        if packet.get('tcp_window'):
+            self.details_text.insert(tk.END, f"  {'TCP Window Size:':<20}", "field")
+            self.details_text.insert(tk.END, f"{packet['tcp_window']}\n", "value")
+
+    def _add_udp_details(self, packet):
+        """Add UDP-specific details to packet details"""
+        self.details_text.insert(tk.END, "\nUDP DETAILS\n", "header")
+        
+        if packet.get('src_port'):
+            self.details_text.insert(tk.END, f"  {'Source Port:':<20}", "field")
+            self.details_text.insert(tk.END, f"{packet['src_port']}\n", "value")
+        
+        if packet.get('dst_port'):
+            self.details_text.insert(tk.END, f"  {'Destination Port:':<20}", "field")
+            self.details_text.insert(tk.END, f"{packet['dst_port']}\n", "value")
+
+    def _add_icmp_details(self, packet):
+        """Add ICMP-specific details to packet details"""
+        self.details_text.insert(tk.END, "\nICMP DETAILS\n", "header")
+        
+        if packet.get('icmp_type'):
+            self.details_text.insert(tk.END, f"  {'ICMP Type:':<20}", "field")
+            self.details_text.insert(tk.END, f"{packet['icmp_type']}\n", "value")
+        else:
+            self.details_text.insert(tk.END, f"  {'ICMP Type:':<20}", "field")
+            self.details_text.insert(tk.END, "Unknown\n", "value")
+        
+        if packet.get('icmp_code'):
+            self.details_text.insert(tk.END, f"  {'ICMP Code:':<20}", "field")
+            self.details_text.insert(tk.END, f"{packet['icmp_code']}\n", "value")
+        else:
+            self.details_text.insert(tk.END, f"  {'ICMP Code:':<20}", "field")
+            self.details_text.insert(tk.END, "Unknown\n", "value")
+
+    def _add_dns_details(self, packet):
+        """Add DNS-specific details to packet details"""
+        self.details_text.insert(tk.END, "\nDNS DETAILS\n", "header")
+        
+        if packet.get('dns_query'):
+            self.details_text.insert(tk.END, f"  {'DNS Query:':<20}", "field")
+            self.details_text.insert(tk.END, f"{packet['dns_query']}\n", "value")
+
+    def _add_http_details(self, packet):
+        """Add HTTP-specific details to packet details"""
+        self.details_text.insert(tk.END, "\nHTTP DETAILS\n", "header")
+        
+        if packet.get('http_method'):
+            self.details_text.insert(tk.END, f"  {'HTTP Method:':<20}", "field")
+            self.details_text.insert(tk.END, f"{packet['http_method']}\n", "value")
+        
+        if packet.get('http_host'):
+            self.details_text.insert(tk.END, f"  {'HTTP Host:':<20}", "field")
+            self.details_text.insert(tk.END, f"{packet['http_host']}\n", "value")
+        
+        if packet.get('http_path'):
+            self.details_text.insert(tk.END, f"  {'HTTP Path:':<20}", "field")
+            self.details_text.insert(tk.END, f"{packet['http_path']}\n", "value")
+
+    def _get_protocol_tag(self, protocol):
+        """Get the tag for the protocol for styling in the treeview"""
+        protocol = protocol.upper() if protocol else ""
+        
+        if "TCP" in protocol:
+            return "tcp"
+        elif "UDP" in protocol:
+            return "udp"
+        elif "ICMP" in protocol:
+            return "icmp"
+        elif "ARP" in protocol:
+            return "arp"
+        elif "DNS" in protocol:
+            return "dns"
+        elif "HTTP" in protocol:
+            return "http"
+        elif "HTTPS" in protocol or "TLS" in protocol or "SSL" in protocol:
+            return "tls"
+        else:
+            return "other"
     
-    app = SnifferGUI(root)
-    root.mainloop()
+    def _configure_protocol_tags(self):
+        """Configure tags for protocols to color rows in treeview"""
+        # Configure tags using Wireshark-like colors
+        if self.current_theme == "light":
+            self.packet_tree.tag_configure("tcp", background=self.protocol_colors["TCP"]["light"])
+            self.packet_tree.tag_configure("udp", background=self.protocol_colors["UDP"]["light"])
+            self.packet_tree.tag_configure("icmp", background=self.protocol_colors["ICMP"]["light"])
+            self.packet_tree.tag_configure("arp", background=self.protocol_colors["ARP"]["light"])
+            self.packet_tree.tag_configure("dns", background=self.protocol_colors["DNS"]["light"])
+            self.packet_tree.tag_configure("http", background=self.protocol_colors["HTTP"]["light"])
+            self.packet_tree.tag_configure("tls", background=self.protocol_colors["TLS"]["light"])
+            self.packet_tree.tag_configure("other", background="#f0f0f0")
+        else:
+            self.packet_tree.tag_configure("tcp", background=self.protocol_colors["TCP"]["dark"])
+            self.packet_tree.tag_configure("udp", background=self.protocol_colors["UDP"]["dark"])
+            self.packet_tree.tag_configure("icmp", background=self.protocol_colors["ICMP"]["dark"])
+            self.packet_tree.tag_configure("arp", background=self.protocol_colors["ARP"]["dark"])
+            self.packet_tree.tag_configure("dns", background=self.protocol_colors["DNS"]["dark"])
+            self.packet_tree.tag_configure("http", background=self.protocol_colors["HTTP"]["dark"])
+            self.packet_tree.tag_configure("tls", background=self.protocol_colors["TLS"]["dark"])
+            self.packet_tree.tag_configure("other", background="#333333")
+
+    def _display_capture_results(self):
+        """Display capture results in the UI"""
+        try:
+            # Use packet list if available, even if stats aren't present
+            if not self.stats and self.all_packets:
+                # Create stats from packet list
+                if self.debug_mode:
+                    self._log_debug(f"Creating stats from {len(self.all_packets)} loaded packets")
+                
+                self.stats = {
+                    'total_packets': len(self.all_packets),
+                    'tcp_packets': sum(1 for p in self.all_packets if p['protocol'] == 'TCP'),
+                    'udp_packets': sum(1 for p in self.all_packets if p['protocol'] == 'UDP'),
+                    'icmp_packets': sum(1 for p in self.all_packets if p['protocol'] == 'ICMP'),
+                    'other_packets': sum(1 for p in self.all_packets if p['protocol'] not in ['TCP', 'UDP', 'ICMP']),
+                    'duration': 0,
+                    'top_ips': {},
+                    'top_destinations': {},
+                    'top_ports': {}
+                }
+                
+                # Calculate top IPs, destinations, and ports
+                for p in self.all_packets:
+                    if p['src_ip']:
+                        self.stats['top_ips'][p['src_ip']] = self.stats['top_ips'].get(p['src_ip'], 0) + 1
+                    if p['dst_ip']:
+                        self.stats['top_destinations'][p['dst_ip']] = self.stats['top_destinations'].get(p['dst_ip'], 0) + 1
+                    if p['src_port']:
+                        self.stats['top_ports'][p['src_port']] = self.stats['top_ports'].get(p['src_port'], 0) + 1
+                    if p['dst_port']:
+                        self.stats['top_ports'][p['dst_port']] = self.stats['top_ports'].get(p['dst_port'], 0) + 1
+            
+            # Update analytics
+            if not self.stats:
+                if self.debug_mode:
+                    self._log_debug("No stats available to display")
+                return
+                
+            # Extract stats based on object type (dict or object with attributes)
+            if isinstance(self.stats, dict):
+                # Direct dictionary access
+                total_packets = self.stats.get('total_packets', 0)
+                duration = self.stats.get('duration', 0)
+                tcp_packets = self.stats.get('tcp_packets', 0)
+                udp_packets = self.stats.get('udp_packets', 0)
+                icmp_packets = self.stats.get('icmp_packets', 0)
+                other_packets = self.stats.get('other_packets', 0)
+                top_ips = self.stats.get('top_ips', {})
+                top_destinations = self.stats.get('top_destinations', {})
+                top_ports = self.stats.get('top_ports', {})
+            else:
+                # Object attribute access
+                total_packets = getattr(self.stats, 'total_packets', 0)
+                duration = getattr(self.stats, 'duration', 0)
+                tcp_packets = getattr(self.stats, 'tcp_packets', 0)
+                udp_packets = getattr(self.stats, 'udp_packets', 0)
+                icmp_packets = getattr(self.stats, 'icmp_packets', 0)
+                other_packets = getattr(self.stats, 'other_packets', 0)
+                top_ips = getattr(self.stats, 'top_ips', {})
+                top_destinations = getattr(self.stats, 'top_destinations', {})
+                top_ports = getattr(self.stats, 'top_ports', {})
+                
+            if total_packets == 0 and self.all_packets:
+                # If stats show 0 packets but we have loaded packets, use the packet count
+                total_packets = len(self.all_packets)
+                if self.debug_mode:
+                    self._log_debug(f"Stats show 0 packets but {total_packets} packets are loaded")
+                
+            if total_packets == 0:
+                if self.debug_mode:
+                    self._log_debug("No packets to display in results")
+                return
+                
+            # Get the top N items from each category
+            top_limit = 5  # Show top 5 items in each category
+            
+            # Sort dictionaries by value (count)
+            if hasattr(top_ips, 'items'):
+                top_ips = sorted(top_ips.items(), key=lambda x: x[1], reverse=True)[:top_limit]
+            else:
+                top_ips = []
+                
+            if hasattr(top_destinations, 'items'):
+                top_destinations = sorted(top_destinations.items(), key=lambda x: x[1], reverse=True)[:top_limit]
+            else:
+                top_destinations = []
+                
+            if hasattr(top_ports, 'items'):
+                top_ports = sorted(top_ports.items(), key=lambda x: x[1], reverse=True)[:top_limit]
+            else:
+                top_ports = []
+            
+            # Display summary
+            summary = f"Total packets: {total_packets}\n"
+            summary += f"Duration: {duration:.2f} seconds\n\n"
+            summary += f"TCP packets: {tcp_packets}\n"
+            summary += f"UDP packets: {udp_packets}\n"
+            summary += f"ICMP packets: {icmp_packets}\n"
+            summary += f"Other packets: {other_packets}\n\n"
+            
+            # Add top sources
+            summary += "Top Source IPs:\n"
+            for ip, count in top_ips:
+                summary += f"  {ip}: {count}\n"
+            
+            # Add top destinations
+            summary += "\nTop Destination IPs:\n"
+            for ip, count in top_destinations:
+                summary += f"  {ip}: {count}\n"
+            
+            # Add top ports
+            summary += "\nTop Ports:\n"
+            for port, count in top_ports:
+                summary += f"  {port}: {count}\n"
+            
+            self.summary_text.delete(1.0, tk.END)
+            self.summary_text.insert(tk.END, summary)
+            
+            # Create protocol distribution chart if matplotlib is available
+            self._create_protocol_chart(tcp_packets, udp_packets, icmp_packets, other_packets)
+                
+        except Exception as e:
+            if self.debug_mode:
+                self._log_debug(f"Error displaying results: {str(e)}")
+                import traceback
+                self._log_debug(traceback.format_exc())
+
+    def _create_protocol_chart(self, tcp_packets, udp_packets, icmp_packets, other_packets):
+        """Create a chart showing protocol distribution"""
+        # Check if matplotlib is available
+        if not has_matplotlib:
+            return
+            
+        try:
+            # Clear previous chart
+            self.protocol_canvas.delete("all")
+            
+            # Create figure and axis
+            fig = plt.Figure(figsize=(4, 3), dpi=100)
+            ax = fig.add_subplot(111)
+            
+            # Extract protocol data
+            protocols = ['TCP', 'UDP', 'ICMP', 'Other']
+            counts = [tcp_packets, udp_packets, icmp_packets, other_packets]
+            
+            # Remove zeros to avoid empty wedges
+            non_zero_protocols = []
+            non_zero_counts = []
+            for i, count in enumerate(counts):
+                if count > 0:
+                    non_zero_protocols.append(protocols[i])
+                    non_zero_counts.append(count)
+            
+            if not non_zero_counts:
+                return  # No data to display
+                
+            # Set colors based on theme
+            colors = []
+            for protocol in non_zero_protocols:
+                if protocol == 'TCP' and 'TCP' in self.protocol_colors:
+                    colors.append(self.protocol_colors['TCP']['light' if self.current_theme == 'light' else 'dark'])
+                elif protocol == 'UDP' and 'UDP' in self.protocol_colors:
+                    colors.append(self.protocol_colors['UDP']['light' if self.current_theme == 'light' else 'dark'])
+                elif protocol == 'ICMP' and 'ICMP' in self.protocol_colors:
+                    colors.append(self.protocol_colors['ICMP']['light' if self.current_theme == 'light' else 'dark'])
+                else:
+                    colors.append('#cccccc' if self.current_theme == 'light' else '#333333')
+            
+            # Create pie chart
+            wedges, texts, autotexts = ax.pie(
+                non_zero_counts, 
+                labels=non_zero_protocols, 
+                autopct='%1.1f%%',
+                colors=colors,
+                startangle=90
+            )
+            
+            # Set text color based on theme
+            for text in texts + autotexts:
+                text.set_color('#000000' if self.current_theme == 'light' else '#ffffff')
+            
+            # Equal aspect ratio ensures that pie is drawn as a circle
+            ax.axis('equal')
+            ax.set_title('Protocol Distribution', color='#000000' if self.current_theme == 'light' else '#ffffff')
+            fig.patch.set_facecolor(self.themes[self.current_theme]['text_bg'])
+            ax.set_facecolor(self.themes[self.current_theme]['text_bg'])
+            
+            # Embed the figure in the tkinter canvas
+            canvas = FigureCanvasTkAgg(fig, master=self.protocol_canvas)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            
+        except Exception as e:
+            if self.debug_mode:
+                self._log_debug(f"Error creating chart: {str(e)}")
+            # Create a label instead of the chart
+            self.protocol_canvas.create_text(
+                200, 100,
+                text=f"Could not create chart: {str(e)}",
+                fill="#000000" if self.current_theme == "light" else "#ffffff"
+            )
+
+    def _update_raw_data_tab(self):
+        """Update the raw data tab with the first 1000 packets"""
+        try:
+            if not hasattr(self, 'all_packets') or not self.all_packets:
+                if self.debug_mode:
+                    self._log_debug("No packets to display in raw data tab")
+                return
+                
+            # Clear existing content
+            self.raw_data_text.delete(1.0, tk.END)
+            
+            # Add header row
+            if self.all_packets and len(self.all_packets) > 0:
+                # Get column names from first packet
+                header = list(self.all_packets[0].keys())
+                self.raw_data_text.insert(tk.END, "# " + ", ".join(header) + "\n")
+                
+                # Add packet data (first 1000 packets to avoid performance issues)
+                display_limit = min(1000, len(self.all_packets))
+                for i in range(display_limit):
+                    packet = self.all_packets[i]
+                    # Convert all values to strings and join with commas
+                    values = [str(packet.get(col, '')) for col in header]
+                    self.raw_data_text.insert(tk.END, ", ".join(values) + "\n")
+                
+                if display_limit < len(self.all_packets):
+                    self.raw_data_text.insert(tk.END, f"\n# Note: Only showing {display_limit} of {len(self.all_packets)} packets")
+            
+            if self.debug_mode:
+                self._log_debug(f"Updated raw data tab with {len(self.all_packets)} packets")
+                
+        except Exception as e:
+            if self.debug_mode:
+                self._log_debug(f"Error updating raw data tab: {str(e)}")
+                import traceback
+                self._log_debug(traceback.format_exc())
+
+    def _on_capture_packet(self, packet_data):
+        """Handle a newly captured packet"""
+        try:
+            if self.debug_mode:
+                self._log_debug(f"Received packet: {packet_data.get('protocol', 'Unknown')}")
+            
+            # Add to all_packets list
+            if not hasattr(self, 'all_packets'):
+                self.all_packets = []
+            self.all_packets.append(packet_data)
+            
+            # Add to tree view
+            values = []
+            for col in self.columns:
+                values.append(packet_data.get(col, ''))
+            
+            self.packet_tree.insert('', 'end', values=values, tags=(packet_data.get('protocol', 'other').lower(),))
+            
+            # Update packet count
+            self.status_label.config(text=f"Packets: {len(self.all_packets)}")
+            
+            # Keep the most recent packet visible by scrolling to the bottom
+            self.packet_tree.yview_moveto(1.0)
+            
+            # Update raw data tab periodically (every 10 packets)
+            if len(self.all_packets) % 10 == 0:
+                self._update_raw_data_tab()
+                
+        except Exception as e:
+            if self.debug_mode:
+                self._log_debug(f"Error processing packet: {str(e)}")
+                import traceback
+                self._log_debug(traceback.format_exc())
 
 if __name__ == "__main__":
-    main() 
+    root = tk.Tk()
+    app = SnifferGUI(root)
+    root.mainloop() 
