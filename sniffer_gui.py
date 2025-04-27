@@ -422,9 +422,42 @@ class SnifferGUI:
         
         ttk.Button(hex_controls_frame, text="View", command=self._display_hex_view).pack(side=tk.LEFT, padx=5, pady=5)
         
+        # Create a paned window for hex view to split content
+        hex_pane = ttk.PanedWindow(self.hex_frame, orient=tk.VERTICAL)
+        hex_pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Top frame for hex display
+        hex_top_frame = ttk.Frame(hex_pane)
+        hex_pane.add(hex_top_frame, weight=3)
+        
         # Hex view text area
-        self.hex_text = scrolledtext.ScrolledText(self.hex_frame, font=("Courier", 10))
-        self.hex_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.hex_text = scrolledtext.ScrolledText(hex_top_frame, font=("Courier", 10))
+        self.hex_text.pack(fill=tk.BOTH, expand=True)
+        
+        # Bottom frame split into technical and layman explanations
+        hex_bottom_frame = ttk.Frame(hex_pane)
+        hex_pane.add(hex_bottom_frame, weight=2)
+        
+        # Create horizontal paned window for technical and user-friendly views
+        hex_bottom_pane = ttk.PanedWindow(hex_bottom_frame, orient=tk.HORIZONTAL)
+        hex_bottom_pane.pack(fill=tk.BOTH, expand=True)
+        
+        # Technical details frame
+        tech_frame = ttk.LabelFrame(hex_bottom_pane, text="Technical Details")
+        hex_bottom_pane.add(tech_frame, weight=1)
+        
+        self.tech_details_text = scrolledtext.ScrolledText(tech_frame, font=("Consolas", 9))
+        self.tech_details_text.pack(fill=tk.BOTH, expand=True)
+        
+        # User-friendly explanation frame
+        user_frame = ttk.LabelFrame(hex_bottom_pane, text="Explained Simply")
+        hex_bottom_pane.add(user_frame, weight=1)
+        
+        self.user_friendly_text = scrolledtext.ScrolledText(user_frame, font=("Segoe UI", 10), wrap=tk.WORD)
+        self.user_friendly_text.pack(fill=tk.BOTH, expand=True)
+        # Enable hyperlink functionality for the user-friendly text
+        self.user_friendly_text.tag_configure("hyperlink", foreground="blue", underline=1)
+        self.user_friendly_text.bind("<Button-1>", self._handle_hyperlink_click)
     
     def _create_statusbar(self):
         """Create the status bar at the bottom of the window"""
@@ -921,6 +954,8 @@ class SnifferGUI:
             if not packet:
                 self.hex_text.delete(1.0, tk.END)
                 self.hex_text.insert(tk.END, f"Packet {packet_id} not found")
+                self.tech_details_text.delete(1.0, tk.END)
+                self.user_friendly_text.delete(1.0, tk.END)
                 return
             
             # Debug: log the keys in the packet to help diagnose
@@ -939,6 +974,10 @@ class SnifferGUI:
                 ascii_color = "#add8e6"     # Light blue for ASCII
                 separator_color = "#808080" # Gray for separators
                 highlight_color = "#3a3a3a" # Dark gray for highlighting
+                
+                self.tech_details_text.config(background="#0f0f0f", foreground="#ffffff")
+                self.user_friendly_text.config(background="#0f0f0f", foreground="#ffffff")
+                link_color = "#00ffff"      # Cyan for hyperlinks in dark mode
             else:
                 self.hex_text.config(background="#ffffff", foreground="#000000")
                 offset_color = "#0000a0"    # Dark blue for offsets
@@ -946,6 +985,10 @@ class SnifferGUI:
                 ascii_color = "#8b0000"     # Dark red for ASCII
                 separator_color = "#a9a9a9" # Dark gray for separators
                 highlight_color = "#f0f0f0" # Light gray for highlighting
+                
+                self.tech_details_text.config(background="#ffffff", foreground="#000000")
+                self.user_friendly_text.config(background="#ffffff", foreground="#000000")
+                link_color = "#0000ff"      # Blue for hyperlinks in light mode
             
             # Configure text tags
             self.hex_text.tag_configure("offset", foreground=offset_color)
@@ -954,9 +997,16 @@ class SnifferGUI:
             self.hex_text.tag_configure("separator", foreground=separator_color)
             self.hex_text.tag_configure("highlight", background=highlight_color)
             
+            # Configure hyperlink tag
+            self.user_friendly_text.tag_configure("hyperlink", foreground=link_color, underline=1)
+            
             # Clear existing content and set a fixed-width font
             self.hex_text.delete(1.0, tk.END)
             self.hex_text.config(font=("Courier New", 10))
+            
+            # Clear technical and user-friendly text areas
+            self.tech_details_text.delete(1.0, tk.END)
+            self.user_friendly_text.delete(1.0, tk.END)
             
             # Get raw data from different possible sources to handle various packet formats
             raw_data = None
@@ -1302,13 +1352,598 @@ class SnifferGUI:
                     import traceback
                     self._log_debug(traceback.format_exc())
             
+            # After displaying the hex dump, add technical details and user-friendly explanations
+            self._display_technical_details(packet, raw_bytes)
+            self._display_user_friendly_explanation(packet, raw_bytes)
+            
         except Exception as e:
             self.hex_text.delete(1.0, tk.END)
             self.hex_text.insert(tk.END, f"Error displaying hex view: {str(e)}")
+            self.tech_details_text.delete(1.0, tk.END)
+            self.user_friendly_text.delete(1.0, tk.END)
             if self.debug_mode:
                 import traceback
                 self._log_debug(f"Error in _display_hex_view: {str(e)}")
                 self._log_debug(traceback.format_exc())
+                
+    def _display_technical_details(self, packet, raw_bytes):
+        """Display detailed technical information about the packet"""
+        protocol = packet.get('protocol', '').upper()
+        
+        details = []
+        details.append("---- PACKET TECHNICAL DETAILS ----\n")
+        
+        # Header info
+        details.append(f"Packet ID: {packet.get('id', 'N/A')}")
+        details.append(f"Timestamp: {packet.get('timestamp', 'N/A')}")
+        details.append(f"Protocol: {protocol}")
+        details.append(f"Length: {packet.get('length', 'N/A')} bytes")
+        details.append("")
+        
+        # MAC Layer details
+        details.append("=== LAYER 2 (Data Link) ===")
+        details.append(f"Source MAC: {packet.get('src_mac', 'N/A')}")
+        details.append(f"Destination MAC: {packet.get('dst_mac', 'N/A')}")
+        if packet.get('eth_type'):
+            details.append(f"EtherType: 0x{packet.get('eth_type'):04x}")
+        details.append("")
+        
+        # IP Layer details (if applicable)
+        if packet.get('src_ip') or packet.get('dst_ip'):
+            details.append("=== LAYER 3 (Network) ===")
+            details.append(f"Source IP: {packet.get('src_ip', 'N/A')}")
+            details.append(f"Destination IP: {packet.get('dst_ip', 'N/A')}")
+            details.append(f"TTL: {packet.get('ttl', 'N/A')}")
+            details.append(f"IP Flags: {packet.get('ip_flags', 'N/A')}")
+            details.append("")
+        
+        # Transport Layer details
+        if protocol in ['TCP', 'UDP', 'ICMP']:
+            details.append("=== LAYER 4 (Transport) ===")
+            if protocol == 'TCP':
+                details.append(f"Source Port: {packet.get('src_port', 'N/A')}")
+                details.append(f"Destination Port: {packet.get('dst_port', 'N/A')}")
+                details.append(f"TCP Flags: {packet.get('tcp_flags', 'N/A')}")
+                details.append(f"Sequence Number: {packet.get('tcp_seq', 'N/A')}")
+                details.append(f"Acknowledgment Number: {packet.get('tcp_ack', 'N/A')}")
+                details.append(f"Window Size: {packet.get('tcp_window', 'N/A')}")
+            elif protocol == 'UDP':
+                details.append(f"Source Port: {packet.get('src_port', 'N/A')}")
+                details.append(f"Destination Port: {packet.get('dst_port', 'N/A')}")
+                details.append(f"UDP Length: {packet.get('udp_length', 'N/A')}")
+            elif protocol == 'ICMP':
+                details.append(f"ICMP Type: {packet.get('icmp_type', 'N/A')}")
+                details.append(f"ICMP Code: {packet.get('icmp_code', 'N/A')}")
+            details.append("")
+        
+        # Application Layer details for known protocols
+        if protocol in ['HTTP', 'DNS', 'DHCP', 'TLS', 'SSH']:
+            details.append("=== LAYER 7 (Application) ===")
+            if protocol == 'HTTP':
+                details.append(f"HTTP Method: {packet.get('http_method', 'N/A')}")
+                details.append(f"HTTP Host: {packet.get('http_host', 'N/A')}")
+                details.append(f"HTTP Path: {packet.get('http_path', 'N/A')}")
+                details.append(f"HTTP Version: {packet.get('http_version', 'N/A')}")
+            elif protocol == 'DNS':
+                details.append(f"DNS Query: {packet.get('dns_query', 'N/A')}")
+                details.append(f"DNS Query Type: {packet.get('dns_qtype', 'N/A')}")
+                details.append(f"DNS Response: {packet.get('dns_response', 'N/A')}")
+            details.append("")
+        
+        # Packet binary structure
+        if raw_bytes and len(raw_bytes) > 0:
+            details.append("=== PACKET STRUCTURE ANALYSIS ===")
+            
+            # Identify Ethernet header
+            if len(raw_bytes) >= 14:
+                details.append("Ethernet Header (first 14 bytes):")
+                details.append(f"  Destination MAC: {':'.join(f'{b:02x}' for b in raw_bytes[0:6])}")
+                details.append(f"  Source MAC: {':'.join(f'{b:02x}' for b in raw_bytes[6:12])}")
+                details.append(f"  EtherType: 0x{raw_bytes[12]:02x}{raw_bytes[13]:02x}")
+                
+                # Identify IP header if present
+                if raw_bytes[12] == 0x08 and raw_bytes[13] == 0x00 and len(raw_bytes) >= 34:
+                    ip_header_len = (raw_bytes[14] & 0x0F) * 4
+                    details.append("")
+                    details.append(f"IPv4 Header (bytes 14-{14+ip_header_len-1}):")
+                    details.append(f"  Version: {raw_bytes[14] >> 4}")
+                    details.append(f"  IHL: {raw_bytes[14] & 0x0F} ({ip_header_len} bytes)")
+                    details.append(f"  DSCP/ECN: 0x{raw_bytes[15]:02x}")
+                    details.append(f"  Total Length: {(raw_bytes[16] << 8) + raw_bytes[17]} bytes")
+                    details.append(f"  Identification: 0x{raw_bytes[18]:02x}{raw_bytes[19]:02x}")
+                    
+                    flags = raw_bytes[20] >> 5
+                    flag_details = []
+                    if flags & 0x01:
+                        flag_details.append("Reserved (must be 0)")
+                    if flags & 0x02:
+                        flag_details.append("Don't Fragment")
+                    if flags & 0x04:
+                        flag_details.append("More Fragments")
+                    
+                    details.append(f"  Flags: {flags} ({', '.join(flag_details) if flag_details else 'None'})")
+                    details.append(f"  Fragment Offset: {((raw_bytes[20] & 0x1F) << 8) + raw_bytes[21]}")
+                    details.append(f"  TTL: {raw_bytes[22]}")
+                    
+                    protocols = {1: "ICMP", 6: "TCP", 17: "UDP", 2: "IGMP"}
+                    protocol_num = raw_bytes[23]
+                    protocol_name = protocols.get(protocol_num, f"Unknown ({protocol_num})")
+                    details.append(f"  Protocol: {protocol_name} ({protocol_num})")
+                    
+                    details.append(f"  Header Checksum: 0x{raw_bytes[24]:02x}{raw_bytes[25]:02x}")
+                    details.append(f"  Source IP: {'.'.join(str(b) for b in raw_bytes[26:30])}")
+                    details.append(f"  Destination IP: {'.'.join(str(b) for b in raw_bytes[30:34])}")
+                    
+                    # Additional info about transport layer if we can identify it
+                    transport_offset = 14 + ip_header_len
+                    
+                    if protocol_num == 6 and len(raw_bytes) >= transport_offset + 20:  # TCP
+                        tcp_header_len = ((raw_bytes[transport_offset + 12] >> 4) & 0x0F) * 4
+                        details.append("")
+                        details.append(f"TCP Header (bytes {transport_offset}-{transport_offset+tcp_header_len-1}):")
+                        details.append(f"  Source Port: {(raw_bytes[transport_offset] << 8) + raw_bytes[transport_offset+1]}")
+                        details.append(f"  Destination Port: {(raw_bytes[transport_offset+2] << 8) + raw_bytes[transport_offset+3]}")
+                        details.append(f"  Sequence Number: 0x{raw_bytes[transport_offset+4]:02x}{raw_bytes[transport_offset+5]:02x}{raw_bytes[transport_offset+6]:02x}{raw_bytes[transport_offset+7]:02x}")
+                        details.append(f"  Acknowledgment Number: 0x{raw_bytes[transport_offset+8]:02x}{raw_bytes[transport_offset+9]:02x}{raw_bytes[transport_offset+10]:02x}{raw_bytes[transport_offset+11]:02x}")
+                        
+                        # TCP flags
+                        tcp_flags = raw_bytes[transport_offset+13]
+                        flag_details = []
+                        if tcp_flags & 0x01: flag_details.append("FIN")
+                        if tcp_flags & 0x02: flag_details.append("SYN")
+                        if tcp_flags & 0x04: flag_details.append("RST")
+                        if tcp_flags & 0x08: flag_details.append("PSH")
+                        if tcp_flags & 0x10: flag_details.append("ACK")
+                        if tcp_flags & 0x20: flag_details.append("URG")
+                        if tcp_flags & 0x40: flag_details.append("ECE")
+                        if tcp_flags & 0x80: flag_details.append("CWR")
+                        
+                        details.append(f"  Data Offset: {(raw_bytes[transport_offset+12] >> 4) & 0x0F} ({tcp_header_len} bytes)")
+                        details.append(f"  Flags: 0x{tcp_flags:02x} ({', '.join(flag_details) if flag_details else 'None'})")
+                        details.append(f"  Window Size: {(raw_bytes[transport_offset+14] << 8) + raw_bytes[transport_offset+15]}")
+                        details.append(f"  Checksum: 0x{raw_bytes[transport_offset+16]:02x}{raw_bytes[transport_offset+17]:02x}")
+                        details.append(f"  Urgent Pointer: 0x{raw_bytes[transport_offset+18]:02x}{raw_bytes[transport_offset+19]:02x}")
+                        
+                        # HTTP detection (very basic)
+                        payload_offset = transport_offset + tcp_header_len
+                        if payload_offset < len(raw_bytes):
+                            payload = raw_bytes[payload_offset:]
+                            payload_text = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in payload)
+                            
+                            if any(method in payload_text for method in ["GET ", "POST ", "HTTP/"]):
+                                details.append("")
+                                details.append(f"HTTP Data Detected (bytes {payload_offset}+):")
+                                details.append(f"  First line: {payload_text.split('\\r\\n')[0] if '\\r\\n' in payload_text else payload_text[:50]+'...'}")
+                    
+                    elif protocol_num == 17 and len(raw_bytes) >= transport_offset + 8:  # UDP
+                        details.append("")
+                        details.append(f"UDP Header (bytes {transport_offset}-{transport_offset+7}):")
+                        details.append(f"  Source Port: {(raw_bytes[transport_offset] << 8) + raw_bytes[transport_offset+1]}")
+                        details.append(f"  Destination Port: {(raw_bytes[transport_offset+2] << 8) + raw_bytes[transport_offset+3]}")
+                        details.append(f"  Length: {(raw_bytes[transport_offset+4] << 8) + raw_bytes[transport_offset+5]} bytes")
+                        details.append(f"  Checksum: 0x{raw_bytes[transport_offset+6]:02x}{raw_bytes[transport_offset+7]:02x}")
+                        
+                        # DNS detection (port 53)
+                        src_port = (raw_bytes[transport_offset] << 8) + raw_bytes[transport_offset+1]
+                        dst_port = (raw_bytes[transport_offset+2] << 8) + raw_bytes[transport_offset+3]
+                        if src_port == 53 or dst_port == 53:
+                            details.append("")
+                            details.append(f"DNS Data Detected (Port 53):")
+        
+        # Join all details and display
+        self.tech_details_text.insert(tk.END, "\n".join(details))
+    
+    def _display_user_friendly_explanation(self, packet, raw_bytes):
+        """Display user-friendly explanations of the packet with links to more information"""
+        protocol = packet.get('protocol', '').upper()
+        
+        explanations = []
+        explanations.append(" COMPLETE PACKET EXPLANATION \n")
+        
+        # Basic packet info in user-friendly terms
+        explanations.append(f"📦 This is packet #{packet.get('id', 'N/A')} captured at {packet.get('timestamp', 'N/A')}")
+        explanations.append(f"📊 Size: {packet.get('length', 'N/A')} bytes")
+        
+        # Direction with visual indicator
+        direction = packet.get('packet_direction', '')
+        if direction == 'Inbound':
+            explanations.append(f"📥 Direction: {direction} - This packet is coming into your device")
+        elif direction == 'Outbound':
+            explanations.append(f"📤 Direction: {direction} - This packet is going out from your device")
+        else:
+            explanations.append(f"🔄 Direction: {direction}")
+        
+        # Protocol explanation - expanded with more details
+        explanations.append("\n🌐 PACKET TYPE & PURPOSE")
+        if protocol == 'TCP':
+            explanations.append("This is a TCP (Transmission Control Protocol) packet.")
+            explanations.append("TCP provides reliable, ordered delivery of data between applications.")
+            explanations.append("It's commonly used for:")
+            explanations.append("• Web browsing (HTTP/HTTPS)")
+            explanations.append("• Email (SMTP, IMAP, POP3)")
+            explanations.append("• File transfers (FTP, SFTP)")
+            explanations.append("• Remote access (SSH, Telnet)")
+            
+            # TCP flags explanation in simple terms
+            if packet.get('tcp_flags'):
+                flags = packet.get('tcp_flags')
+                explanations.append("\n🚩 TCP Flags - What is this packet doing?")
+                
+                if 'SYN' in flags and 'ACK' in flags:
+                    explanations.append("This packet is acknowledging a connection request (SYN-ACK). This is part of the 'handshake' that starts a connection.")
+                elif 'SYN' in flags:
+                    explanations.append("This packet is requesting to start a new connection (SYN). This is the first step in establishing communication.")
+                elif 'FIN' in flags and 'ACK' in flags:
+                    explanations.append("This packet is gracefully ending a connection while acknowledging data (FIN-ACK).")
+                elif 'FIN' in flags:
+                    explanations.append("This packet is requesting to end the connection (FIN). This is the start of a graceful shutdown.")
+                elif 'RST' in flags:
+                    explanations.append("⚠️ This packet is forcibly terminating a connection (RST). This usually indicates an error or unexpected behavior.")
+                elif 'ACK' in flags and 'PSH' in flags:
+                    explanations.append("This packet is delivering data and requesting immediate processing (PSH-ACK). Common during active data transfer.")
+                elif 'ACK' in flags:
+                    explanations.append("This packet is acknowledging received data (ACK). It's telling the sender 'I got your data'.")
+                
+                # Add suspicious flag combinations
+                if 'SYN' in flags and 'FIN' in flags:
+                    explanations.append("⚠️ WARNING: This packet has both SYN and FIN flags set, which is abnormal and often indicates a port scan or attack!")
+                if 'SYN' in flags and 'RST' in flags:
+                    explanations.append("⚠️ WARNING: This packet has both SYN and RST flags set, which is abnormal and potentially malicious!")
+            
+            # TCP Window size explanation
+            if packet.get('tcp_window'):
+                window = packet.get('tcp_window')
+                if window != 'N/A' and window.isdigit():
+                    window_size = int(window)
+                    explanations.append(f"\nℹ️ TCP Window Size: {window}")
+                    explanations.append("The window size indicates how much data can be sent before requiring acknowledgment.")
+                    if window_size < 1000:
+                        explanations.append("This is a small window size, possibly indicating network congestion or limited receiving capacity.")
+                    elif window_size > 65000:
+                        explanations.append("This is a large window size, indicating a high-capacity connection with good throughput.")
+            
+        elif protocol == 'UDP':
+            explanations.append("This is a UDP (User Datagram Protocol) packet.")
+            explanations.append("UDP is simpler than TCP and doesn't guarantee delivery, order, or error-checking.")
+            explanations.append("It's commonly used for:")
+            explanations.append("• Video/audio streaming (faster but can tolerate some data loss)")
+            explanations.append("• Online gaming (where speed is critical)")
+            explanations.append("• DNS lookups (translating domain names to IP addresses)")
+            explanations.append("• VoIP calls (voice over internet)")
+            
+        elif protocol == 'ICMP':
+            explanations.append("This is an ICMP (Internet Control Message Protocol) packet.")
+            explanations.append("ICMP helps networks diagnose problems by sending error messages and operational information.")
+            explanations.append("Common ICMP messages include:")
+            
+            icmp_type = packet.get('icmp_type', 'N/A')
+            icmp_code = packet.get('icmp_code', 'N/A')
+            
+            if icmp_type == '0':
+                explanations.append("• Echo Reply (ping response) - A device responding to a ping request")
+            elif icmp_type == '8':
+                explanations.append("• Echo Request (ping) - Checking if a device is reachable")
+            elif icmp_type == '3':
+                explanations.append("• Destination Unreachable - The target couldn't be reached")
+                if icmp_code == '0':
+                    explanations.append("  (Network Unreachable - The network is unreachable)")
+                elif icmp_code == '1':
+                    explanations.append("  (Host Unreachable - The specific device is unreachable)")
+                elif icmp_code == '3':
+                    explanations.append("  (Port Unreachable - The service on that device isn't available)")
+            elif icmp_type == '11':
+                explanations.append("• Time Exceeded - The packet took too long to reach its destination")
+                
+        elif protocol == 'DNS':
+            explanations.append("This is a DNS (Domain Name System) packet.")
+            explanations.append("DNS translates human-readable domain names (like google.com) into IP addresses computers use.")
+            explanations.append("It's like the internet's phone book.")
+            
+            dns_query = packet.get('dns_query', '')
+            if dns_query and dns_query != 'N/A':
+                explanations.append(f"\nℹ️ DNS Query: {dns_query}")
+                explanations.append(f"Someone is looking up the address for '{dns_query}'")
+                
+            dns_response = packet.get('dns_response', '')
+            if dns_response and dns_response != 'N/A':
+                explanations.append(f"\nℹ️ DNS Response: {dns_response}")
+                explanations.append(f"The DNS server is providing the IP address for a requested domain")
+                
+        elif protocol == 'HTTP':
+            explanations.append("This is an HTTP (Hypertext Transfer Protocol) packet.")
+            explanations.append("HTTP is used for browsing websites. It transfers web page data between servers and browsers.")
+            
+            http_method = packet.get('http_method', '')
+            http_host = packet.get('http_host', '')
+            http_path = packet.get('http_path', '')
+            
+            if http_method and http_method != 'N/A':
+                explanations.append(f"\n📄 HTTP Method: {http_method}")
+                if http_method == 'GET':
+                    explanations.append("This is requesting a web page or resource (like viewing a site)")
+                elif http_method == 'POST':
+                    explanations.append("This is submitting data to a web server (like filling out a form)")
+                elif http_method == 'HEAD':
+                    explanations.append("This is checking for updates to a web page without downloading all content")
+                    
+            if http_host and http_host != 'N/A':
+                explanations.append(f"📍 Website: {http_host}")
+                
+            if http_path and http_path != 'N/A':
+                explanations.append(f"🔍 Specific page/resource: {http_path}")
+                
+            explanations.append("\n⚠️ Security Note: HTTP traffic is unencrypted! Anyone in between can see this data.")
+            
+        elif protocol == 'HTTPS':
+            explanations.append("This is an HTTPS (HTTP Secure) packet.")
+            explanations.append("HTTPS is encrypted web browsing traffic, protecting your privacy and security.")
+            explanations.append("The contents are encrypted, so even if someone intercepts it, they cannot read the data.")
+            
+        elif protocol == 'ARP':
+            explanations.append("This is an ARP (Address Resolution Protocol) packet.")
+            explanations.append("ARP helps devices find each other on a local network.")
+            explanations.append("It translates IP addresses (like 192.168.1.1) to physical MAC addresses (like 00:1A:2B:3C:4D:5E).")
+            explanations.append("Think of it as asking 'Who has this IP address?' on your local network.")
+            
+        else:
+            explanations.append(f"This is a {protocol} packet.")
+            explanations.append("This protocol is used for specialized network communication.")
+        
+        # Source and destination in user-friendly terms - ENHANCED
+        explanations.append("\n🔄 COMMUNICATION DETAILS")
+        src_ip = packet.get('src_ip', 'N/A')
+        dst_ip = packet.get('dst_ip', 'N/A')
+        src_mac = packet.get('src_mac', 'N/A')
+        dst_mac = packet.get('dst_mac', 'N/A')
+        
+        explanations.append(f"Source IP: {src_ip}")
+        explanations.append(f"Destination IP: {dst_ip}")
+        
+        # Add MAC address info with explanation
+        explanations.append(f"\nSource MAC: {src_mac}")
+        explanations.append(f"Destination MAC: {dst_mac}")
+        explanations.append("MAC addresses are like the physical addresses of network devices, similar to a serial number.")
+        
+        if src_ip != 'N/A' and dst_ip != 'N/A':
+            # Identify if internal or external IPs with more context
+            is_internal_src = self._is_private_ip(src_ip)
+            is_internal_dst = self._is_private_ip(dst_ip)
+            
+            explanations.append("\n📍 Network Context:")
+            if is_internal_src and is_internal_dst:
+                explanations.append("This is local network traffic between two devices on your network.")
+                explanations.append("This is typical for file sharing, printers, or devices communicating within your home/office.")
+            elif is_internal_src:
+                explanations.append(f"A device on your network ({src_ip}) is sending data to an external address ({dst_ip}).")
+                explanations.append("This is normal for outgoing web traffic, emails, or other internet activity.")
+            elif is_internal_dst:
+                explanations.append(f"An external address ({src_ip}) is sending data to a device on your network ({dst_ip}).")
+                explanations.append("This could be a response to a request, incoming data, or potentially unwanted traffic.")
+            else:
+                explanations.append(f"This appears to be traffic between two external addresses.")
+                explanations.append("Your device captured this traffic passing through the network. This is unusual unless you're monitoring network traffic.")
+        
+        # Add TTL explanation
+        ttl = packet.get('ttl', 'N/A')
+        if ttl != 'N/A' and ttl.isdigit():
+            ttl_value = int(ttl)
+            explanations.append(f"\n⏱️ TTL (Time To Live): {ttl}")
+            explanations.append("TTL determines how many network hops (routers) a packet can travel through before being discarded.")
+            if ttl_value < 64:
+                explanations.append("This packet has a relatively low TTL value, indicating it may have traveled through multiple routers.")
+            if ttl_value <= 30:
+                explanations.append("The low TTL could indicate international traffic or a complex routing path.")
+        
+        # Port explanation - ENHANCED with more ports and explanations
+        src_port = packet.get('src_port', 'N/A')
+        dst_port = packet.get('dst_port', 'N/A')
+        
+        if src_port != 'N/A' or dst_port != 'N/A':
+            well_known_ports = {
+                '20': 'FTP data transfer',
+                '21': 'File transfers (FTP control)',
+                '22': 'Secure remote access (SSH)',
+                '23': 'Telnet (insecure remote access)',
+                '25': 'Email sending (SMTP)',
+                '53': 'Domain name lookup (DNS)',
+                '67': 'DHCP server (IP address assignment)',
+                '68': 'DHCP client (IP address request)',
+                '80': 'Web browsing (HTTP)',
+                '110': 'Email receiving (POP3)',
+                '123': 'Network time synchronization (NTP)',
+                '143': 'Email access (IMAP)',
+                '161': 'Network management (SNMP)',
+                '443': 'Secure web browsing (HTTPS)',
+                '465': 'Secure email sending (SMTPS)',
+                '500': 'Internet Security Association (IPsec)',
+                '587': 'Email submission',
+                '993': 'Secure email receiving (IMAPS)',
+                '995': 'Secure POP3 (POP3S)',
+                '1194': 'VPN (OpenVPN)',
+                '1433': 'Database (Microsoft SQL Server)',
+                '1723': 'VPN (PPTP)',
+                '3306': 'Database (MySQL)',
+                '3389': 'Remote desktop (RDP)',
+                '5060': 'Voice over IP (SIP)',
+                '5432': 'Database (PostgreSQL)',
+                '8080': 'Alternative web/proxy server',
+                '8443': 'Alternative secure web server',
+                '27017': 'Database (MongoDB)'
+            }
+            
+            # Add explanation for high port numbers
+            high_ports = []
+            if src_port != 'N/A' and src_port.isdigit() and int(src_port) > 1023:
+                high_ports.append(src_port)
+            if dst_port != 'N/A' and dst_port.isdigit() and int(dst_port) > 1023:
+                high_ports.append(dst_port)
+                
+            explanations.append("\n🚪 PORT INFORMATION")
+            explanations.append("Ports are like specific channels or doors for different types of internet traffic.")
+            explanations.append(f"Source Port: {src_port}")
+            explanations.append(f"Destination Port: {dst_port}")
+            
+            # Add high port explanation
+            if high_ports:
+                explanations.append(f"\nNote: Ports above 1023 (like {', '.join(high_ports)}) are typically temporary ports used by your device for outgoing connections.")
+            
+            # Explain common port combinations
+            if ((src_port == '80' or dst_port == '80') and protocol == 'TCP'):
+                explanations.append("\nThis is standard web browsing traffic (HTTP).")
+            elif ((src_port == '443' or dst_port == '443') and protocol == 'TCP'):
+                explanations.append("\nThis is secure web browsing traffic (HTTPS).")
+            elif ((src_port == '53' or dst_port == '53') and protocol == 'UDP'):
+                explanations.append("\nThis is domain name resolution traffic (DNS).")
+            
+            port_explanation = []
+            if src_port in well_known_ports:
+                port_explanation.append(f"Source port {src_port} is used for {well_known_ports[src_port]}.")
+            
+            if dst_port in well_known_ports:
+                port_explanation.append(f"Destination port {dst_port} is used for {well_known_ports[dst_port]}.")
+            
+            if port_explanation:
+                for exp in port_explanation:
+                    explanations.append(exp)
+        
+        # Security analysis - EXPANDED
+        explanations.append("\n🔒 SECURITY ANALYSIS")
+        security_concerns = []
+        security_ok = []
+        
+        # Check for potential security issues
+        if protocol == 'TCP' and packet.get('tcp_flags'):
+            flags = packet.get('tcp_flags')
+            if 'FIN' in flags and 'SYN' in flags:
+                security_concerns.append("⚠️ UNUSUAL FLAG COMBINATION: This packet has both SYN and FIN flags set, which is unusual and could indicate a port scan or network attack.")
+            elif 'RST' in flags and 'SYN' in flags:
+                security_concerns.append("⚠️ UNUSUAL FLAG COMBINATION: This packet has both SYN and RST flags set, which is abnormal and potentially malicious.")
+            elif 'NULL' in flags:
+                security_concerns.append("⚠️ NULL SCAN DETECTED: This packet has no flags set, which is typically part of a stealth port scan.")
+            elif 'RST' in flags and direction == 'Inbound':
+                security_concerns.append("ℹ️ CONNECTION REJECTED: A remote server actively refused a connection from your device.")
+            elif 'SYN' in flags and dst_port != 'N/A' and dst_port.isdigit() and int(dst_port) < 1024:
+                security_concerns.append(f"ℹ️ CONNECTION REQUEST: Someone is trying to connect to a service on port {dst_port}.")
+        
+        # Check for unencrypted protocols
+        if protocol in ['HTTP', 'TELNET', 'FTP']:
+            security_concerns.append(f"⚠️ UNENCRYPTED PROTOCOL: {protocol} sends data in plain text, which is not secure.")
+            
+            if protocol == 'HTTP':
+                security_concerns.append("Consider using HTTPS instead for sensitive browsing.")
+            elif protocol == 'TELNET':
+                security_concerns.append("SSH is a more secure alternative for remote access.")
+            elif protocol == 'FTP':
+                security_concerns.append("SFTP or FTPS provide encrypted file transfers.")
+        
+        # Secure protocols
+        if protocol in ['HTTPS', 'SSH', 'SFTP']:
+            security_ok.append(f"✅ ENCRYPTED PROTOCOL: {protocol} uses encryption to protect your data.")
+        
+        # Check for broadcast traffic
+        if dst_ip == '255.255.255.255' or dst_mac == 'ff:ff:ff:ff:ff:ff':
+            security_concerns.append("ℹ️ BROADCAST TRAFFIC: This packet is being sent to all devices on the local network.")
+        
+        # Add security findings to explanations
+        if security_concerns:
+            for concern in security_concerns:
+                explanations.append(concern)
+        
+        if security_ok:
+            for ok in security_ok:
+                explanations.append(ok)
+                
+        if not security_concerns and not security_ok:
+            explanations.append("No obvious security concerns detected in this packet.")
+        
+        # Add packet characteristics and patterns section
+        explanations.append("\n🧩 PACKET CHARACTERISTICS")
+        
+        packet_length = packet.get('length', 'N/A')
+        if packet_length != 'N/A' and packet_length.isdigit():
+            length_value = int(packet_length)
+            if length_value < 60:
+                explanations.append(f"📏 SMALL PACKET: At {packet_length} bytes, this is a small packet, likely just control information without much data.")
+            elif length_value > 1400:
+                explanations.append(f"📏 LARGE PACKET: At {packet_length} bytes, this is a large packet carrying substantial data.")
+            else:
+                explanations.append(f"📏 MEDIUM PACKET: At {packet_length} bytes, this is an average-sized packet.")
+        
+        # Add a section about the hex view itself
+        explanations.append("\n🔢 UNDERSTANDING THE HEX VIEW")
+        explanations.append("The hex view shows the raw packet data in hexadecimal (base-16) format. Each byte is shown as two characters from 0-9 and a-f.")
+        explanations.append("• The leftmost column shows the offset (position) in the packet")
+        explanations.append("• The middle columns show the raw bytes in hexadecimal")
+        explanations.append("• The rightmost column shows the ASCII representation (printable characters)")
+        
+        
+        
+        
+        # Join all explanations and display
+        for line in explanations:
+            if line.startswith("_LINK_"):
+                # Special case for hyperlinks added earlier
+                continue
+            self.user_friendly_text.insert(tk.END, line + "\n")
+    
+    def _add_hyperlink(self, text_widget, hyperlink_text, url):
+        """Add a hyperlink to the text widget"""
+        text_widget.insert(tk.END, "\n→ ")
+        
+        # Store the position where the link starts
+        start_pos = text_widget.index(tk.INSERT)
+        
+        # Insert the link text
+        text_widget.insert(tk.END, hyperlink_text, "hyperlink")
+        
+        # Store the position where the link ends
+        end_pos = text_widget.index(tk.INSERT)
+        
+        # Add the URL as a tag
+        text_widget.tag_add(url, start_pos, end_pos)
+        
+        # Add a newline after the link
+        text_widget.insert(tk.END, "\n")
+    
+    def _handle_hyperlink_click(self, event):
+        """Handle clicks on hyperlinks in the user-friendly text widget"""
+        try:
+            # Get the position of the click
+            index = self.user_friendly_text.index(f"@{event.x},{event.y}")
+            
+            # Get all tags at this position
+            tags = self.user_friendly_text.tag_names(index)
+            
+            # Find a tag that looks like a URL
+            for tag in tags:
+                if tag.startswith("http"):
+                    # Open the URL in the default browser
+                    import webbrowser
+                    webbrowser.open(tag)
+                    break
+        except Exception as e:
+            if self.debug_mode:
+                self._log_debug(f"Error handling hyperlink click: {str(e)}")
+    
+    def _is_private_ip(self, ip):
+        """Check if an IP address is private/internal"""
+        try:
+            # Check for loopback address
+            if ip.startswith("127."):
+                return True
+            
+            # Check for private IP ranges
+            octet1, octet2, *_ = ip.split(".")
+            if octet1 == "10":  # 10.0.0.0/8
+                return True
+            if octet1 == "172" and 16 <= int(octet2) <= 31:  # 172.16.0.0/12
+                return True
+            if octet1 == "192" and octet2 == "168":  # 192.168.0.0/16
+                return True
+            
+            return False
+        except:
+            return False
 
     def _apply_theme(self):
         """Apply the current theme to the UI"""
@@ -2279,4 +2914,4 @@ class SnifferGUI:
 if __name__ == "__main__":
     root = tk.Tk()
     app = SnifferGUI(root)
-    root.mainloop() 
+    root.mainloop()
