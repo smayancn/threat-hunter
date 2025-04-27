@@ -1538,74 +1538,260 @@ class SnifferGUI:
         protocol = packet.get('protocol', '').upper()
         
         explanations = []
-        explanations.append("🔍 Packet Explorer - Simple Explanation\n")
+        explanations.append(" COMPLETE PACKET EXPLANATION \n")
         
         # Basic packet info in user-friendly terms
         explanations.append(f"📦 This is packet #{packet.get('id', 'N/A')} captured at {packet.get('timestamp', 'N/A')}")
         explanations.append(f"📊 Size: {packet.get('length', 'N/A')} bytes")
         
-        # Protocol explanation
-        explanations.append("\n🌐 What kind of packet is this?")
-        if protocol == 'TCP':
-            explanations.append("This is a TCP packet. TCP is used for reliable communication, like when you browse websites, send emails, or transfer files.")
-            self._add_hyperlink(self.user_friendly_text, "Learn more about TCP", "https://en.wikipedia.org/wiki/Transmission_Control_Protocol")
-        elif protocol == 'UDP':
-            explanations.append("This is a UDP packet. UDP is used for fast, simple transmissions like video streaming, gaming, or DNS lookups.")
-            self._add_hyperlink(self.user_friendly_text, "Learn more about UDP", "https://en.wikipedia.org/wiki/User_Datagram_Protocol")
-        elif protocol == 'ICMP':
-            explanations.append("This is an ICMP packet. ICMP helps networks diagnose problems, like when you ping a website or get a 'destination unreachable' message.")
-            self._add_hyperlink(self.user_friendly_text, "Learn more about ICMP", "https://en.wikipedia.org/wiki/Internet_Control_Message_Protocol")
-        elif protocol == 'DNS':
-            explanations.append("This is a DNS packet. DNS translates human-readable website names (like google.com) into IP addresses computers can use.")
-            self._add_hyperlink(self.user_friendly_text, "Learn more about DNS", "https://en.wikipedia.org/wiki/Domain_Name_System")
-        elif protocol == 'HTTP':
-            explanations.append("This is an HTTP packet. HTTP is the protocol used when you browse websites.")
-            self._add_hyperlink(self.user_friendly_text, "Learn more about HTTP", "https://en.wikipedia.org/wiki/Hypertext_Transfer_Protocol")
-        elif protocol == 'ARP':
-            explanations.append("This is an ARP packet. ARP helps devices find each other on a local network by translating IP addresses to MAC addresses.")
-            self._add_hyperlink(self.user_friendly_text, "Learn more about ARP", "https://en.wikipedia.org/wiki/Address_Resolution_Protocol")
+        # Direction with visual indicator
+        direction = packet.get('packet_direction', '')
+        if direction == 'Inbound':
+            explanations.append(f"📥 Direction: {direction} - This packet is coming into your device")
+        elif direction == 'Outbound':
+            explanations.append(f"📤 Direction: {direction} - This packet is going out from your device")
         else:
-            explanations.append(f"This is a {protocol} packet. This protocol is used for specialized network communication.")
+            explanations.append(f"🔄 Direction: {direction}")
         
-        # Source and destination in user-friendly terms
-        explanations.append("\n🔄 Communication Details")
+        # Protocol explanation - expanded with more details
+        explanations.append("\n🌐 PACKET TYPE & PURPOSE")
+        if protocol == 'TCP':
+            explanations.append("This is a TCP (Transmission Control Protocol) packet.")
+            explanations.append("TCP provides reliable, ordered delivery of data between applications.")
+            explanations.append("It's commonly used for:")
+            explanations.append("• Web browsing (HTTP/HTTPS)")
+            explanations.append("• Email (SMTP, IMAP, POP3)")
+            explanations.append("• File transfers (FTP, SFTP)")
+            explanations.append("• Remote access (SSH, Telnet)")
+            
+            # TCP flags explanation in simple terms
+            if packet.get('tcp_flags'):
+                flags = packet.get('tcp_flags')
+                explanations.append("\n🚩 TCP Flags - What is this packet doing?")
+                
+                if 'SYN' in flags and 'ACK' in flags:
+                    explanations.append("This packet is acknowledging a connection request (SYN-ACK). This is part of the 'handshake' that starts a connection.")
+                elif 'SYN' in flags:
+                    explanations.append("This packet is requesting to start a new connection (SYN). This is the first step in establishing communication.")
+                elif 'FIN' in flags and 'ACK' in flags:
+                    explanations.append("This packet is gracefully ending a connection while acknowledging data (FIN-ACK).")
+                elif 'FIN' in flags:
+                    explanations.append("This packet is requesting to end the connection (FIN). This is the start of a graceful shutdown.")
+                elif 'RST' in flags:
+                    explanations.append("⚠️ This packet is forcibly terminating a connection (RST). This usually indicates an error or unexpected behavior.")
+                elif 'ACK' in flags and 'PSH' in flags:
+                    explanations.append("This packet is delivering data and requesting immediate processing (PSH-ACK). Common during active data transfer.")
+                elif 'ACK' in flags:
+                    explanations.append("This packet is acknowledging received data (ACK). It's telling the sender 'I got your data'.")
+                
+                # Add suspicious flag combinations
+                if 'SYN' in flags and 'FIN' in flags:
+                    explanations.append("⚠️ WARNING: This packet has both SYN and FIN flags set, which is abnormal and often indicates a port scan or attack!")
+                if 'SYN' in flags and 'RST' in flags:
+                    explanations.append("⚠️ WARNING: This packet has both SYN and RST flags set, which is abnormal and potentially malicious!")
+            
+            # TCP Window size explanation
+            if packet.get('tcp_window'):
+                window = packet.get('tcp_window')
+                explanations.append(f"\nℹ️ TCP Window Size: {window}")
+                explanations.append("The window size indicates how much data can be sent before requiring acknowledgment.")
+                if int(window) < 1000:
+                    explanations.append("This is a small window size, possibly indicating network congestion or limited receiving capacity.")
+                elif int(window) > 65000:
+                    explanations.append("This is a large window size, indicating a high-capacity connection with good throughput.")
+            
+        elif protocol == 'UDP':
+            explanations.append("This is a UDP (User Datagram Protocol) packet.")
+            explanations.append("UDP is simpler than TCP and doesn't guarantee delivery, order, or error-checking.")
+            explanations.append("It's commonly used for:")
+            explanations.append("• Video/audio streaming (faster but can tolerate some data loss)")
+            explanations.append("• Online gaming (where speed is critical)")
+            explanations.append("• DNS lookups (translating domain names to IP addresses)")
+            explanations.append("• VoIP calls (voice over internet)")
+            
+        elif protocol == 'ICMP':
+            explanations.append("This is an ICMP (Internet Control Message Protocol) packet.")
+            explanations.append("ICMP helps networks diagnose problems by sending error messages and operational information.")
+            explanations.append("Common ICMP messages include:")
+            
+            icmp_type = packet.get('icmp_type', 'N/A')
+            icmp_code = packet.get('icmp_code', 'N/A')
+            
+            if icmp_type == '0':
+                explanations.append("• Echo Reply (ping response) - A device responding to a ping request")
+            elif icmp_type == '8':
+                explanations.append("• Echo Request (ping) - Checking if a device is reachable")
+            elif icmp_type == '3':
+                explanations.append("• Destination Unreachable - The target couldn't be reached")
+                if icmp_code == '0':
+                    explanations.append("  (Network Unreachable - The network is unreachable)")
+                elif icmp_code == '1':
+                    explanations.append("  (Host Unreachable - The specific device is unreachable)")
+                elif icmp_code == '3':
+                    explanations.append("  (Port Unreachable - The service on that device isn't available)")
+            elif icmp_type == '11':
+                explanations.append("• Time Exceeded - The packet took too long to reach its destination")
+                
+        elif protocol == 'DNS':
+            explanations.append("This is a DNS (Domain Name System) packet.")
+            explanations.append("DNS translates human-readable domain names (like google.com) into IP addresses computers use.")
+            explanations.append("It's like the internet's phone book.")
+            
+            dns_query = packet.get('dns_query', '')
+            if dns_query:
+                explanations.append(f"\nℹ️ DNS Query: {dns_query}")
+                explanations.append(f"Someone is looking up the address for '{dns_query}'")
+                
+            dns_response = packet.get('dns_response', '')
+            if dns_response:
+                explanations.append(f"\nℹ️ DNS Response: {dns_response}")
+                explanations.append(f"The DNS server is providing the IP address for a requested domain")
+                
+        elif protocol == 'HTTP':
+            explanations.append("This is an HTTP (Hypertext Transfer Protocol) packet.")
+            explanations.append("HTTP is used for browsing websites. It transfers web page data between servers and browsers.")
+            
+            http_method = packet.get('http_method', '')
+            http_host = packet.get('http_host', '')
+            http_path = packet.get('http_path', '')
+            
+            if http_method:
+                explanations.append(f"\n📄 HTTP Method: {http_method}")
+                if http_method == 'GET':
+                    explanations.append("This is requesting a web page or resource (like viewing a site)")
+                elif http_method == 'POST':
+                    explanations.append("This is submitting data to a web server (like filling out a form)")
+                elif http_method == 'HEAD':
+                    explanations.append("This is checking for updates to a web page without downloading all content")
+                    
+            if http_host:
+                explanations.append(f"📍 Website: {http_host}")
+                
+            if http_path:
+                explanations.append(f"🔍 Specific page/resource: {http_path}")
+                
+            explanations.append("\n⚠️ Security Note: HTTP traffic is unencrypted! Anyone in between can see this data.")
+            self._add_hyperlink(self.user_friendly_text, "Why HTTPS is more secure", "https://en.wikipedia.org/wiki/HTTPS")
+            
+        elif protocol == 'HTTPS':
+            explanations.append("This is an HTTPS (HTTP Secure) packet.")
+            explanations.append("HTTPS is encrypted web browsing traffic, protecting your privacy and security.")
+            explanations.append("The contents are encrypted, so even if someone intercepts it, they cannot read the data.")
+            
+        elif protocol == 'ARP':
+            explanations.append("This is an ARP (Address Resolution Protocol) packet.")
+            explanations.append("ARP helps devices find each other on a local network.")
+            explanations.append("It translates IP addresses (like 192.168.1.1) to physical MAC addresses (like 00:1A:2B:3C:4D:5E).")
+            explanations.append("Think of it as asking 'Who has this IP address?' on your local network.")
+            
+        else:
+            explanations.append(f"This is a {protocol} packet.")
+            explanations.append("This protocol is used for specialized network communication.")
+        
+        # Source and destination in user-friendly terms - ENHANCED
+        explanations.append("\n🔄 COMMUNICATION DETAILS")
         src_ip = packet.get('src_ip', 'N/A')
         dst_ip = packet.get('dst_ip', 'N/A')
+        src_mac = packet.get('src_mac', 'N/A')
+        dst_mac = packet.get('dst_mac', 'N/A')
+        
+        explanations.append(f"Source IP: {src_ip}")
+        explanations.append(f"Destination IP: {dst_ip}")
+        
+        # Add MAC address info with explanation
+        explanations.append(f"\nSource MAC: {src_mac}")
+        explanations.append(f"Destination MAC: {dst_mac}")
+        explanations.append("MAC addresses are like the physical addresses of network devices, similar to a serial number.")
         
         if src_ip != 'N/A' and dst_ip != 'N/A':
-            # Identify if internal or external IPs
+            # Identify if internal or external IPs with more context
             is_internal_src = self._is_private_ip(src_ip)
             is_internal_dst = self._is_private_ip(dst_ip)
             
+            explanations.append("\n📍 Network Context:")
             if is_internal_src and is_internal_dst:
-                explanations.append(f"This is local network traffic between two devices on your network.")
+                explanations.append("This is local network traffic between two devices on your network.")
+                explanations.append("This is typical for file sharing, printers, or devices communicating within your home/office.")
             elif is_internal_src:
-                explanations.append(f"A device on your network is sending data to an external address ({dst_ip}).")
+                explanations.append(f"A device on your network ({src_ip}) is sending data to an external address ({dst_ip}).")
+                explanations.append("This is normal for outgoing web traffic, emails, or other internet activity.")
             elif is_internal_dst:
-                explanations.append(f"An external address ({src_ip}) is sending data to a device on your network.")
+                explanations.append(f"An external address ({src_ip}) is sending data to a device on your network ({dst_ip}).")
+                explanations.append("This could be a response to a request, incoming data, or potentially unwanted traffic.")
             else:
-                explanations.append(f"This appears to be traffic between two external addresses that your device captured.")
+                explanations.append(f"This appears to be traffic between two external addresses.")
+                explanations.append("Your device captured this traffic passing through the network. This is unusual unless you're monitoring network traffic.")
         
-        # Port explanation
+        # Add TTL explanation
+        ttl = packet.get('ttl', 'N/A')
+        if ttl != 'N/A':
+            explanations.append(f"\n⏱️ TTL (Time To Live): {ttl}")
+            explanations.append("TTL determines how many network hops (routers) a packet can travel through before being discarded.")
+            if int(ttl) < 64:
+                explanations.append("This packet has a relatively low TTL value, indicating it may have traveled through multiple routers.")
+            if int(ttl) <= 30:
+                explanations.append("The low TTL could indicate international traffic or a complex routing path.")
+        
+        # Port explanation - ENHANCED with more ports and explanations
         src_port = packet.get('src_port')
         dst_port = packet.get('dst_port')
         
         if src_port and dst_port:
             well_known_ports = {
-                '80': 'Web browsing (HTTP)',
-                '443': 'Secure web browsing (HTTPS)',
-                '53': 'Domain name lookup (DNS)',
-                '21': 'File transfers (FTP)',
+                '20': 'FTP data transfer',
+                '21': 'File transfers (FTP control)',
                 '22': 'Secure remote access (SSH)',
+                '23': 'Telnet (insecure remote access)',
                 '25': 'Email sending (SMTP)',
+                '53': 'Domain name lookup (DNS)',
+                '67': 'DHCP server (IP address assignment)',
+                '68': 'DHCP client (IP address request)',
+                '80': 'Web browsing (HTTP)',
                 '110': 'Email receiving (POP3)',
+                '123': 'Network time synchronization (NTP)',
                 '143': 'Email access (IMAP)',
-                '3389': 'Remote desktop (RDP)',
+                '161': 'Network management (SNMP)',
+                '443': 'Secure web browsing (HTTPS)',
+                '465': 'Secure email sending (SMTPS)',
+                '500': 'Internet Security Association (IPsec)',
+                '587': 'Email submission',
+                '993': 'Secure email receiving (IMAPS)',
+                '995': 'Secure POP3 (POP3S)',
                 '1194': 'VPN (OpenVPN)',
+                '1433': 'Database (Microsoft SQL Server)',
+                '1723': 'VPN (PPTP)',
                 '3306': 'Database (MySQL)',
+                '3389': 'Remote desktop (RDP)',
+                '5060': 'Voice over IP (SIP)',
                 '5432': 'Database (PostgreSQL)',
+                '8080': 'Alternative web/proxy server',
+                '8443': 'Alternative secure web server',
                 '27017': 'Database (MongoDB)'
             }
+            
+            # Add explanation for high port numbers
+            high_ports = []
+            if src_port and int(src_port) > 1023:
+                high_ports.append(src_port)
+            if dst_port and int(dst_port) > 1023:
+                high_ports.append(dst_port)
+                
+            explanations.append("\n🚪 PORT INFORMATION")
+            explanations.append("Ports are like specific channels or doors for different types of internet traffic.")
+            explanations.append(f"Source Port: {src_port}")
+            explanations.append(f"Destination Port: {dst_port}")
+            
+            # Add high port explanation
+            if high_ports:
+                explanations.append(f"\nNote: Ports above 1023 (like {', '.join(high_ports)}) are typically temporary ports used by your device for outgoing connections.")
+            
+            # Explain common port combinations
+            if (src_port == '80' or dst_port == '80') and protocol == 'TCP':
+                explanations.append("\nThis is standard web browsing traffic (HTTP).")
+            elif (src_port == '443' or dst_port == '443') and protocol == 'TCP':
+                explanations.append("\nThis is secure web browsing traffic (HTTPS).")
+            elif (src_port == '53' or dst_port == '53') and protocol == 'UDP':
+                explanations.append("\nThis is domain name resolution traffic (DNS).")
             
             port_explanation = []
             if src_port in well_known_ports:
@@ -1615,36 +1801,86 @@ class SnifferGUI:
                 port_explanation.append(f"Destination port {dst_port} is used for {well_known_ports[dst_port]}.")
             
             if port_explanation:
-                explanations.append("\n🚪 Port Information")
                 for exp in port_explanation:
                     explanations.append(exp)
         
+        # Security analysis - EXPANDED
+        explanations.append("\n🔒 SECURITY ANALYSIS")
+        security_concerns = []
+        security_ok = []
+        
+        # Check for potential security issues
+        if protocol == 'TCP' and packet.get('tcp_flags'):
+            flags = packet.get('tcp_flags')
+            if 'FIN' in flags and 'SYN' in flags:
+                security_concerns.append("⚠️ UNUSUAL FLAG COMBINATION: This packet has both SYN and FIN flags set, which is unusual and could indicate a port scan or network attack.")
+                self._add_hyperlink(self.user_friendly_text, "What is a port scan?", "https://en.wikipedia.org/wiki/Port_scanner")
+            elif 'RST' in flags and 'SYN' in flags:
+                security_concerns.append("⚠️ UNUSUAL FLAG COMBINATION: This packet has both SYN and RST flags set, which is abnormal and potentially malicious.")
+            elif 'NULL' in flags:
+                security_concerns.append("⚠️ NULL SCAN DETECTED: This packet has no flags set, which is typically part of a stealth port scan.")
+            elif 'RST' in flags and direction == 'Inbound':
+                security_concerns.append("ℹ️ CONNECTION REJECTED: A remote server actively refused a connection from your device.")
+            elif 'SYN' in flags:
+                if int(dst_port) < 1024:
+                    security_concerns.append(f"ℹ️ CONNECTION REQUEST: Someone is trying to connect to a service on port {dst_port}.")
+        
+        # Check for unencrypted protocols
+        if protocol in ['HTTP', 'TELNET', 'FTP']:
+            security_concerns.append(f"⚠️ UNENCRYPTED PROTOCOL: {protocol} sends data in plain text, which is not secure.")
+            
+            if protocol == 'HTTP':
+                security_concerns.append("Consider using HTTPS instead for sensitive browsing.")
+                self._add_hyperlink(self.user_friendly_text, "Why HTTPS matters", "https://en.wikipedia.org/wiki/HTTPS")
+            elif protocol == 'TELNET':
+                security_concerns.append("SSH is a more secure alternative for remote access.")
+                self._add_hyperlink(self.user_friendly_text, "SSH vs Telnet", "https://en.wikipedia.org/wiki/Secure_Shell")
+            elif protocol == 'FTP':
+                security_concerns.append("SFTP or FTPS provide encrypted file transfers.")
+        
+        # Secure protocols
+        if protocol in ['HTTPS', 'SSH', 'SFTP']:
+            security_ok.append(f"✅ ENCRYPTED PROTOCOL: {protocol} uses encryption to protect your data.")
+        
+        # Check for broadcast traffic
+        if dst_ip == '255.255.255.255' or dst_mac == 'ff:ff:ff:ff:ff:ff':
+            security_concerns.append("ℹ️ BROADCAST TRAFFIC: This packet is being sent to all devices on the local network.")
+        
+        # Add security findings to explanations
+        if security_concerns:
+            for concern in security_concerns:
+                explanations.append(concern)
+        
+        if security_ok:
+            for ok in security_ok:
+                explanations.append(ok)
+                
+        if not security_concerns and not security_ok:
+            explanations.append("No obvious security concerns detected in this packet.")
+        
+        # Add packet characteristics and patterns section
+        explanations.append("\n🧩 PACKET CHARACTERISTICS")
+        
+        packet_length = packet.get('length', 'N/A')
+        if packet_length != 'N/A':
+            if int(packet_length) < 60:
+                explanations.append(f"📏 SMALL PACKET: At {packet_length} bytes, this is a small packet, likely just control information without much data.")
+            elif int(packet_length) > 1400:
+                explanations.append(f"📏 LARGE PACKET: At {packet_length} bytes, this is a large packet carrying substantial data.")
+            else:
+                explanations.append(f"📏 MEDIUM PACKET: At {packet_length} bytes, this is an average-sized packet.")
+        
         # Add a section about the hex view itself
-        explanations.append("\n🔢 Understanding the Hex View Above")
+        explanations.append("\n🔢 UNDERSTANDING THE HEX VIEW")
         explanations.append("The hex view shows the raw packet data in hexadecimal (base-16) format. Each byte is shown as two characters from 0-9 and a-f.")
         explanations.append("• The leftmost column shows the offset (position) in the packet")
         explanations.append("• The middle columns show the raw bytes in hexadecimal")
         explanations.append("• The rightmost column shows the ASCII representation (printable characters)")
-        self._add_hyperlink(self.user_friendly_text, "Learn about hexadecimal", "https://en.wikipedia.org/wiki/Hexadecimal")
         
-        # Security notes
-        if protocol in ['TCP', 'UDP', 'HTTP']:
-            explanations.append("\n🔒 Security Notes")
-            
-            # For TCP, check for unusual flags
-            if protocol == 'TCP' and packet.get('tcp_flags'):
-                flags = packet.get('tcp_flags')
-                if 'FIN' in flags and 'SYN' in flags:
-                    explanations.append("⚠️ This packet has both SYN and FIN flags set, which is unusual and could indicate a port scan or malicious activity.")
-                elif 'SYN' in flags:
-                    explanations.append("This packet is attempting to establish a new connection (SYN flag).")
-                elif 'FIN' in flags:
-                    explanations.append("This packet is closing a connection (FIN flag).")
-            
-            # Warning for unencrypted HTTP
-            if protocol == 'HTTP':
-                explanations.append("⚠️ HTTP traffic is unencrypted. Sensitive information sent this way could be intercepted.")
-                self._add_hyperlink(self.user_friendly_text, "Why HTTPS is important", "https://en.wikipedia.org/wiki/HTTPS")
+        
+        # Add educational links section
+        
+        
         
         # Join all explanations and display
         for line in explanations:
