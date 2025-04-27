@@ -1593,12 +1593,14 @@ class SnifferGUI:
             # TCP Window size explanation
             if packet.get('tcp_window'):
                 window = packet.get('tcp_window')
-                explanations.append(f"\nℹ️ TCP Window Size: {window}")
-                explanations.append("The window size indicates how much data can be sent before requiring acknowledgment.")
-                if int(window) < 1000:
-                    explanations.append("This is a small window size, possibly indicating network congestion or limited receiving capacity.")
-                elif int(window) > 65000:
-                    explanations.append("This is a large window size, indicating a high-capacity connection with good throughput.")
+                if window != 'N/A' and window.isdigit():
+                    window_size = int(window)
+                    explanations.append(f"\nℹ️ TCP Window Size: {window}")
+                    explanations.append("The window size indicates how much data can be sent before requiring acknowledgment.")
+                    if window_size < 1000:
+                        explanations.append("This is a small window size, possibly indicating network congestion or limited receiving capacity.")
+                    elif window_size > 65000:
+                        explanations.append("This is a large window size, indicating a high-capacity connection with good throughput.")
             
         elif protocol == 'UDP':
             explanations.append("This is a UDP (User Datagram Protocol) packet.")
@@ -1638,12 +1640,12 @@ class SnifferGUI:
             explanations.append("It's like the internet's phone book.")
             
             dns_query = packet.get('dns_query', '')
-            if dns_query:
+            if dns_query and dns_query != 'N/A':
                 explanations.append(f"\nℹ️ DNS Query: {dns_query}")
                 explanations.append(f"Someone is looking up the address for '{dns_query}'")
                 
             dns_response = packet.get('dns_response', '')
-            if dns_response:
+            if dns_response and dns_response != 'N/A':
                 explanations.append(f"\nℹ️ DNS Response: {dns_response}")
                 explanations.append(f"The DNS server is providing the IP address for a requested domain")
                 
@@ -1655,7 +1657,7 @@ class SnifferGUI:
             http_host = packet.get('http_host', '')
             http_path = packet.get('http_path', '')
             
-            if http_method:
+            if http_method and http_method != 'N/A':
                 explanations.append(f"\n📄 HTTP Method: {http_method}")
                 if http_method == 'GET':
                     explanations.append("This is requesting a web page or resource (like viewing a site)")
@@ -1664,14 +1666,13 @@ class SnifferGUI:
                 elif http_method == 'HEAD':
                     explanations.append("This is checking for updates to a web page without downloading all content")
                     
-            if http_host:
+            if http_host and http_host != 'N/A':
                 explanations.append(f"📍 Website: {http_host}")
                 
-            if http_path:
+            if http_path and http_path != 'N/A':
                 explanations.append(f"🔍 Specific page/resource: {http_path}")
                 
             explanations.append("\n⚠️ Security Note: HTTP traffic is unencrypted! Anyone in between can see this data.")
-            self._add_hyperlink(self.user_friendly_text, "Why HTTPS is more secure", "https://en.wikipedia.org/wiki/HTTPS")
             
         elif protocol == 'HTTPS':
             explanations.append("This is an HTTPS (HTTP Secure) packet.")
@@ -1724,19 +1725,20 @@ class SnifferGUI:
         
         # Add TTL explanation
         ttl = packet.get('ttl', 'N/A')
-        if ttl != 'N/A':
+        if ttl != 'N/A' and ttl.isdigit():
+            ttl_value = int(ttl)
             explanations.append(f"\n⏱️ TTL (Time To Live): {ttl}")
             explanations.append("TTL determines how many network hops (routers) a packet can travel through before being discarded.")
-            if int(ttl) < 64:
+            if ttl_value < 64:
                 explanations.append("This packet has a relatively low TTL value, indicating it may have traveled through multiple routers.")
-            if int(ttl) <= 30:
+            if ttl_value <= 30:
                 explanations.append("The low TTL could indicate international traffic or a complex routing path.")
         
         # Port explanation - ENHANCED with more ports and explanations
-        src_port = packet.get('src_port')
-        dst_port = packet.get('dst_port')
+        src_port = packet.get('src_port', 'N/A')
+        dst_port = packet.get('dst_port', 'N/A')
         
-        if src_port and dst_port:
+        if src_port != 'N/A' or dst_port != 'N/A':
             well_known_ports = {
                 '20': 'FTP data transfer',
                 '21': 'File transfers (FTP control)',
@@ -1771,9 +1773,9 @@ class SnifferGUI:
             
             # Add explanation for high port numbers
             high_ports = []
-            if src_port and int(src_port) > 1023:
+            if src_port != 'N/A' and src_port.isdigit() and int(src_port) > 1023:
                 high_ports.append(src_port)
-            if dst_port and int(dst_port) > 1023:
+            if dst_port != 'N/A' and dst_port.isdigit() and int(dst_port) > 1023:
                 high_ports.append(dst_port)
                 
             explanations.append("\n🚪 PORT INFORMATION")
@@ -1786,11 +1788,11 @@ class SnifferGUI:
                 explanations.append(f"\nNote: Ports above 1023 (like {', '.join(high_ports)}) are typically temporary ports used by your device for outgoing connections.")
             
             # Explain common port combinations
-            if (src_port == '80' or dst_port == '80') and protocol == 'TCP':
+            if ((src_port == '80' or dst_port == '80') and protocol == 'TCP'):
                 explanations.append("\nThis is standard web browsing traffic (HTTP).")
-            elif (src_port == '443' or dst_port == '443') and protocol == 'TCP':
+            elif ((src_port == '443' or dst_port == '443') and protocol == 'TCP'):
                 explanations.append("\nThis is secure web browsing traffic (HTTPS).")
-            elif (src_port == '53' or dst_port == '53') and protocol == 'UDP':
+            elif ((src_port == '53' or dst_port == '53') and protocol == 'UDP'):
                 explanations.append("\nThis is domain name resolution traffic (DNS).")
             
             port_explanation = []
@@ -1814,16 +1816,14 @@ class SnifferGUI:
             flags = packet.get('tcp_flags')
             if 'FIN' in flags and 'SYN' in flags:
                 security_concerns.append("⚠️ UNUSUAL FLAG COMBINATION: This packet has both SYN and FIN flags set, which is unusual and could indicate a port scan or network attack.")
-                self._add_hyperlink(self.user_friendly_text, "What is a port scan?", "https://en.wikipedia.org/wiki/Port_scanner")
             elif 'RST' in flags and 'SYN' in flags:
                 security_concerns.append("⚠️ UNUSUAL FLAG COMBINATION: This packet has both SYN and RST flags set, which is abnormal and potentially malicious.")
             elif 'NULL' in flags:
                 security_concerns.append("⚠️ NULL SCAN DETECTED: This packet has no flags set, which is typically part of a stealth port scan.")
             elif 'RST' in flags and direction == 'Inbound':
                 security_concerns.append("ℹ️ CONNECTION REJECTED: A remote server actively refused a connection from your device.")
-            elif 'SYN' in flags:
-                if int(dst_port) < 1024:
-                    security_concerns.append(f"ℹ️ CONNECTION REQUEST: Someone is trying to connect to a service on port {dst_port}.")
+            elif 'SYN' in flags and dst_port != 'N/A' and dst_port.isdigit() and int(dst_port) < 1024:
+                security_concerns.append(f"ℹ️ CONNECTION REQUEST: Someone is trying to connect to a service on port {dst_port}.")
         
         # Check for unencrypted protocols
         if protocol in ['HTTP', 'TELNET', 'FTP']:
@@ -1831,10 +1831,8 @@ class SnifferGUI:
             
             if protocol == 'HTTP':
                 security_concerns.append("Consider using HTTPS instead for sensitive browsing.")
-                self._add_hyperlink(self.user_friendly_text, "Why HTTPS matters", "https://en.wikipedia.org/wiki/HTTPS")
             elif protocol == 'TELNET':
                 security_concerns.append("SSH is a more secure alternative for remote access.")
-                self._add_hyperlink(self.user_friendly_text, "SSH vs Telnet", "https://en.wikipedia.org/wiki/Secure_Shell")
             elif protocol == 'FTP':
                 security_concerns.append("SFTP or FTPS provide encrypted file transfers.")
         
@@ -1862,10 +1860,11 @@ class SnifferGUI:
         explanations.append("\n🧩 PACKET CHARACTERISTICS")
         
         packet_length = packet.get('length', 'N/A')
-        if packet_length != 'N/A':
-            if int(packet_length) < 60:
+        if packet_length != 'N/A' and packet_length.isdigit():
+            length_value = int(packet_length)
+            if length_value < 60:
                 explanations.append(f"📏 SMALL PACKET: At {packet_length} bytes, this is a small packet, likely just control information without much data.")
-            elif int(packet_length) > 1400:
+            elif length_value > 1400:
                 explanations.append(f"📏 LARGE PACKET: At {packet_length} bytes, this is a large packet carrying substantial data.")
             else:
                 explanations.append(f"📏 MEDIUM PACKET: At {packet_length} bytes, this is an average-sized packet.")
@@ -1877,8 +1876,6 @@ class SnifferGUI:
         explanations.append("• The middle columns show the raw bytes in hexadecimal")
         explanations.append("• The rightmost column shows the ASCII representation (printable characters)")
         
-        
-        # Add educational links section
         
         
         
