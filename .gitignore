@@ -1,2 +1,5 @@
-/capture
+.gitattributes
+.gitattributes
 /__pycache__
+/capture
+.gitattributes
