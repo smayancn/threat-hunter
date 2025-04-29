@@ -48,6 +48,7 @@ python sniffer_gui.py
 ```
 
 The GUI provides an intuitive interface to:
+
 - Select network interfaces
 - Configure capture settings
 - Start/stop packet capture
@@ -62,6 +63,7 @@ python sniffer.py [interface] [duration] [output_file]
 ```
 
 Example:
+
 ```bash
 python sniffer.py eth0 60 capture.csv
 ```
@@ -77,23 +79,27 @@ python analyzer.py capture.csv
 ```bash
 python sus-gen.py [interface] [duration]
 ```
+
 **Warning**: Only use the suspicious traffic generator in isolated test environments.
 
 ## Features in Detail
 
 ### Packet Capture
+
 - Multiple capture methods (socket-based, scapy-based)
 - Support for various network interfaces
 - Packet filtering capabilities
 - CSV output format
 
 ### Traffic Analysis
+
 - Protocol distribution statistics
 - Top source and destination IP addresses
 - HTTP request analysis
 - Traffic rate calculation
 
 ### GUI Features
+
 - Dark/light theme support
 - Real-time packet display
 - Detailed packet inspection
