@@ -378,10 +378,56 @@ class SnifferGUI:
             self.security_summary = self._generate_security_summary(self.security_findings)
             
             # Update the GUI in the main thread
-            self.master.after(0, self.update_security_display)
+            self.master.after(0, lambda: self.update_security_display())
+            
+            # Update the dashboard variables directly
+            if hasattr(self, 'suspicious_count_var'):
+                # Count suspicious packets
+                suspicious_count = sum(1 for f in self.security_findings if f.get('severity', '') in ['medium', 'high', 'critical'])
+                self.suspicious_count_var.set(str(suspicious_count))
+                self._log_debug(f"Setting dashboard suspicious_count to {suspicious_count}")
+                
+                # Count potential attacks
+                attack_types = ['brute force', 'port scan', 'data exfiltration', 'malware', 'suspicious']
+                attack_count = sum(1 for f in self.security_findings 
+                                if any(attack_type in f.get('type', '').lower() for attack_type in attack_types))
+                self.attack_count_var.set(str(attack_count))
+                self._log_debug(f"Setting dashboard attack_count to {attack_count}")
+                
+                # Count unique suspicious IPs
+                suspicious_ips = set()
+                for finding in self.security_findings:
+                    if 'related_ips' in finding and finding['related_ips']:
+                        suspicious_ips.update(finding['related_ips'])
+                self.malicious_ip_count_var.set(str(len(suspicious_ips)))
+                self._log_debug(f"Setting dashboard malicious_ip_count to {len(suspicious_ips)}")
+            
+            # Update the security tree with new findings
+            if hasattr(self, 'security_tree'):
+                # Clear existing items
+                for item in self.security_tree.get_children():
+                    self.security_tree.delete(item)
+                
+                # Add new findings
+                for finding in self.security_findings:
+                    self.security_tree.insert("", "end", values=(
+                        finding.get('id', 'Unknown'),
+                        finding.get('timestamp', 'Unknown'),
+                        finding.get('severity', 'Unknown').upper(),
+                        finding.get('type', 'Unknown'),
+                        finding.get('summary', 'No summary')
+                    ))
+                self._log_debug(f"Updated security_tree with {len(self.security_findings)} findings")
+            
+            # Update threat level indicator
+            if hasattr(self, 'threat_level_var') and hasattr(self, 'threat_canvas'):
+                self._update_threat_level_from_findings()
             
             # Make sure the security tab is displayed
             self.notebook.select(self.security_frame)
+            
+            # Update status
+            self.status_label.config(text="Security analysis complete")
         
         thread = threading.Thread(target=analysis_thread)
         thread.daemon = True
@@ -417,6 +463,29 @@ class SnifferGUI:
             status_text, status_color = status_map.get(highest, ("Status: Unknown", "black"))
         
         self.metrics['security_status'].config(text=status_text, foreground=status_color)
+        
+        # Update main security dashboard metrics
+        # (These are the ones shown in the screenshot)
+        if hasattr(self, 'suspicious_count_var'):
+            # Count suspicious packets
+            suspicious_count = sum(1 for f in self.security_findings if f['severity'] in ['medium', 'high', 'critical'])
+            self.suspicious_count_var.set(str(suspicious_count))
+            self._log_debug(f"Setting suspicious_count to {suspicious_count}")
+            
+            # Count potential attacks
+            attack_types = ['brute force', 'port scan', 'data exfiltration', 'malware', 'suspicious']
+            attack_count = sum(1 for f in self.security_findings 
+                            if any(attack_type in f.get('type', '').lower() for attack_type in attack_types))
+            self.attack_count_var.set(str(attack_count))
+            self._log_debug(f"Setting attack_count to {attack_count}")
+            
+            # Count unique suspicious IPs
+            suspicious_ips = set()
+            for finding in self.security_findings:
+                if 'related_ips' in finding and finding['related_ips']:
+                    suspicious_ips.update(finding['related_ips'])
+            self.malicious_ip_count_var.set(str(len(suspicious_ips)))
+            self._log_debug(f"Setting malicious_ip_count to {len(suspicious_ips)}")
         
         # Populate findings tree
         current_filter = self.severity_filter.get().lower()
@@ -464,6 +533,47 @@ class SnifferGUI:
         
         # Force UI update
         self.master.update_idletasks()
+    
+    def _update_threat_level_from_findings(self):
+        """Update the threat level indicator based on findings"""
+        try:
+            # Count findings by severity
+            critical_count = sum(1 for f in self.security_findings if f.get('severity', '').lower() == 'critical')
+            high_count = sum(1 for f in self.security_findings if f.get('severity', '').lower() == 'high')
+            medium_count = sum(1 for f in self.security_findings if f.get('severity', '').lower() == 'medium')
+            low_count = sum(1 for f in self.security_findings if f.get('severity', '').lower() == 'low')
+            
+            # Determine overall threat level
+            if critical_count > 0:
+                threat_level = "Critical"
+                color = "#ff0000"  # Red
+            elif high_count > 0:
+                threat_level = "High"
+                color = "#ff4500"  # OrangeRed
+            elif medium_count > 0:
+                threat_level = "Medium"
+                color = "#ffa500"  # Orange
+            elif low_count > 0:
+                threat_level = "Low"
+                color = "#ffff00"  # Yellow
+            else:
+                threat_level = "Low"
+                color = "#00ff00"  # Green
+            
+            # Update the threat level label
+            if hasattr(self, 'threat_level_var'):
+                self.threat_level_var.set(threat_level)
+                self._log_debug(f"Setting threat_level to {threat_level}")
+            
+            # Update threat indicator on canvas
+            if hasattr(self, 'threat_canvas'):
+                self.threat_canvas.delete("all")
+                self.threat_canvas.create_rectangle(0, 0, 100, 30, fill=color, outline="")
+            
+        except Exception as e:
+            self._log_debug(f"Error updating threat level: {str(e)}")
+            import traceback
+            self._log_debug(traceback.format_exc())
 
     def on_finding_select(self, event):
         """Handle selection of a finding in the tree"""
