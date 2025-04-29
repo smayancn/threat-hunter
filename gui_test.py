@@ -9,6 +9,8 @@ import re
 import random
 from datetime import datetime
 import csv
+import json
+from tkinter import filedialog
 
 # Try importing matplotlib for visualization
 try:
@@ -109,6 +111,490 @@ except Exception as e:
 import sniffer
 
 class SnifferGUI:
+    def __init__(self, master=None):
+        super().__init__(master)
+        self.master = master
+        self.master.protocol("WM_DELETE_WINDOW", self.on_closing)  # Handle window close
+        self.master.title("Threat Hunter - Network Traffic Analyzer")
+        self.create_widgets()
+        self.packets = []
+        self.packet_tree = None
+        
+        self.protocol_stats = {}
+        self.ip_stats = {}
+        self.port_stats = {}
+        
+        self.selected_packet = None
+        self.capture_active = False
+        self.stop_capture_event = threading.Event()
+        self.capture_thread = None
+        self.capture_file = None
+        
+        # New properties for security analysis
+        self.security_findings = []
+        self.security_summary = {}
+        self.debug_mode = True  # Set to False in production
+        
+        # Create a debug log file
+        if self.debug_mode:
+            self.debug_log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug.log")
+            with open(self.debug_log, "w") as f:
+                f.write(f"Debug log started at {datetime.now()}\n")
+
+    def create_widgets(self):
+        # Configure grid weight to allow resizing
+        self.master.grid_rowconfigure(0, weight=1)
+        self.master.grid_columnconfigure(0, weight=1)
+        
+        # Create main frame
+        self.mainframe = ttk.Frame(self.master)
+        self.mainframe.grid(sticky="nsew")
+        
+        # Configure frame grid weight
+        self.mainframe.grid_rowconfigure(1, weight=1)
+        self.mainframe.grid_columnconfigure(0, weight=1)
+        
+        # Create menubar
+        self.create_menu()
+        
+        # Create toolbar for common actions
+        self.create_toolbar()
+        
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(self.mainframe)
+        self.notebook.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        
+        # Create packets tab
+        self.packets_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.packets_frame, text="Packets")
+        
+        # Create analytics tab
+        self.analytics_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.analytics_frame, text="Analytics")
+        
+        # Create raw data tab
+        self.raw_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.raw_frame, text="Raw Data")
+        
+        # Create hex view tab
+        self.hex_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.hex_frame, text="Hex View")
+        
+        # Create security tab
+        self.security_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.security_frame, text="Security")
+        
+        # Setup the tab contents
+        self.setup_packets_tab()
+        self.setup_analytics_tab()
+        self.setup_raw_tab()
+        self.setup_hex_tab()
+        self.setup_security_tab()
+        
+        # Create status bar
+        self.statusbar = ttk.Frame(self.mainframe, relief=tk.SUNKEN, padding=(2, 2))
+        self.statusbar.grid(row=2, column=0, sticky="ew")
+        
+        self.status_label = ttk.Label(self.statusbar, text="Ready")
+        self.status_label.pack(side=tk.LEFT)
+        
+        self.packet_count_label = ttk.Label(self.statusbar, text="Packets: 0")
+        self.packet_count_label.pack(side=tk.RIGHT)
+
+    def setup_security_tab(self):
+        """Setup the security analysis tab"""
+        # Configure grid weights
+        self.security_frame.grid_rowconfigure(1, weight=1)
+        self.security_frame.grid_columnconfigure(0, weight=1)
+        
+        # Control bar with buttons
+        control_frame = ttk.Frame(self.security_frame)
+        control_frame.grid(row=0, column=0, sticky="ew", pady=5)
+        
+        ttk.Button(control_frame, text="Run Security Analysis", 
+                  command=self.run_security_analysis).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(control_frame, text="Export Findings", 
+                  command=self.export_security_findings).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Label(control_frame, text="Severity Filter:").pack(side=tk.LEFT, padx=(15, 5))
+        
+        self.severity_filter = ttk.Combobox(control_frame, values=["All", "Critical", "High", "Medium", "Low", "Info"], 
+                                           width=10, state="readonly")
+        self.severity_filter.current(0)  # Set to "All" by default
+        self.severity_filter.pack(side=tk.LEFT, padx=5)
+        self.severity_filter.bind("<<ComboboxSelected>>", self.filter_security_findings)
+        
+        # Create paned window to split the security tab
+        security_paned = ttk.PanedWindow(self.security_frame, orient=tk.HORIZONTAL)
+        security_paned.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        
+        # Left panel for findings list
+        findings_frame = ttk.Frame(security_paned)
+        security_paned.add(findings_frame, weight=40)
+        
+        # Configure findings frame
+        findings_frame.grid_rowconfigure(1, weight=1)
+        findings_frame.grid_columnconfigure(0, weight=1)
+        
+        # Create summary frame for security metrics
+        summary_frame = ttk.LabelFrame(findings_frame, text="Security Summary")
+        summary_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+        
+        # Summary metrics
+        metrics_frame = ttk.Frame(summary_frame)
+        metrics_frame.pack(fill=tk.X, expand=True, padx=10, pady=5)
+        
+        # Create metric labels with default values
+        self.metrics = {
+            'findings_count': ttk.Label(metrics_frame, text="Total Findings: 0"),
+            'critical_count': ttk.Label(metrics_frame, text="Critical: 0", foreground="red"),
+            'high_count': ttk.Label(metrics_frame, text="High: 0", foreground="orange"),
+            'medium_count': ttk.Label(metrics_frame, text="Medium: 0", foreground="blue"),
+            'low_count': ttk.Label(metrics_frame, text="Low: 0"),
+            'security_status': ttk.Label(metrics_frame, text="Status: No issues detected", 
+                                       foreground="green", font=("", 10, "bold"))
+        }
+        
+        # Position metric labels
+        self.metrics['findings_count'].grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        self.metrics['critical_count'].grid(row=0, column=1, padx=5, pady=2, sticky="w")
+        self.metrics['high_count'].grid(row=0, column=2, padx=5, pady=2, sticky="w")
+        self.metrics['medium_count'].grid(row=0, column=3, padx=5, pady=2, sticky="w")
+        self.metrics['low_count'].grid(row=0, column=4, padx=5, pady=2, sticky="w")
+        self.metrics['security_status'].grid(row=1, column=0, columnspan=5, padx=5, pady=2, sticky="w")
+        
+        # Create findings treeview
+        findings_label = ttk.Label(findings_frame, text="Security Findings:")
+        findings_label.grid(row=2, column=0, sticky="w", padx=5)
+        
+        # Create a frame for the treeview and scrollbar
+        findings_tree_frame = ttk.Frame(findings_frame)
+        findings_tree_frame.grid(row=3, column=0, sticky="nsew", padx=5, pady=5)
+        findings_tree_frame.grid_rowconfigure(0, weight=1)
+        findings_tree_frame.grid_columnconfigure(0, weight=1)
+        
+        # Create scrollbar
+        findings_scrollbar = ttk.Scrollbar(findings_tree_frame)
+        findings_scrollbar.grid(row=0, column=1, sticky="ns")
+        
+        # Create treeview
+        self.findings_tree = ttk.Treeview(findings_tree_frame, 
+                                         columns=("severity", "type", "summary"),
+                                         show="headings",
+                                         yscrollcommand=findings_scrollbar.set)
+        self.findings_tree.grid(row=0, column=0, sticky="nsew")
+        findings_scrollbar.config(command=self.findings_tree.yview)
+        
+        # Define column headings
+        self.findings_tree.heading("severity", text="Severity")
+        self.findings_tree.heading("type", text="Type")
+        self.findings_tree.heading("summary", text="Summary")
+        
+        # Define column widths
+        self.findings_tree.column("severity", width=80, anchor="center")
+        self.findings_tree.column("type", width=150)
+        self.findings_tree.column("summary", width=350)
+        
+        # Bind selection event
+        self.findings_tree.bind("<<TreeviewSelect>>", self.on_finding_select)
+        
+        # Right panel for finding details
+        details_frame = ttk.Frame(security_paned)
+        security_paned.add(details_frame, weight=60)
+        
+        # Configure details frame
+        details_frame.grid_rowconfigure(1, weight=1)
+        details_frame.grid_columnconfigure(0, weight=1)
+        
+        # Create detail view label
+        details_label = ttk.Label(details_frame, text="Finding Details:")
+        details_label.grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        
+        # Create notebook for details tabs
+        details_notebook = ttk.Notebook(details_frame)
+        details_notebook.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        
+        # Overview tab
+        overview_frame = ttk.Frame(details_notebook)
+        details_notebook.add(overview_frame, text="Overview")
+        
+        # Technical details tab
+        technical_frame = ttk.Frame(details_notebook)
+        details_notebook.add(technical_frame, text="Technical Details")
+        
+        # Recommendations tab
+        recommendations_frame = ttk.Frame(details_notebook)
+        details_notebook.add(recommendations_frame, text="Recommendations")
+        
+        # Configure overview frame
+        overview_frame.grid_rowconfigure(0, weight=1)
+        overview_frame.grid_columnconfigure(0, weight=1)
+        
+        # Create overview text widget
+        self.overview_text = tk.Text(overview_frame, wrap=tk.WORD, padx=10, pady=10, 
+                                    height=20, width=50)
+        self.overview_text.grid(row=0, column=0, sticky="nsew")
+        self.overview_text.config(state=tk.DISABLED)
+        
+        # Configure technical frame
+        technical_frame.grid_rowconfigure(0, weight=1)
+        technical_frame.grid_columnconfigure(0, weight=1)
+        
+        # Create technical details text widget
+        self.technical_text = tk.Text(technical_frame, wrap=tk.WORD, padx=10, pady=10,
+                                     height=20, width=50)
+        self.technical_text.grid(row=0, column=0, sticky="nsew")
+        self.technical_text.config(state=tk.DISABLED)
+        
+        # Configure recommendations frame
+        recommendations_frame.grid_rowconfigure(0, weight=1)
+        recommendations_frame.grid_columnconfigure(0, weight=1)
+        
+        # Create recommendations text widget
+        self.recommendations_text = tk.Text(recommendations_frame, wrap=tk.WORD, padx=10, pady=10,
+                                          height=20, width=50)
+        self.recommendations_text.grid(row=0, column=0, sticky="nsew")
+        self.recommendations_text.config(state=tk.DISABLED)
+
+    def run_security_analysis(self):
+        """Run security analysis on the captured packets"""
+        if not self.packets:
+            messagebox.showinfo("Security Analysis", "No packets to analyze. Please capture or load some traffic first.")
+            return
+        
+        self.status_label.config(text="Running security analysis...")
+        self.master.update_idletasks()
+        
+        # Clear previous findings
+        self.security_findings = []
+        
+        # Run analysis in a thread to avoid freezing the GUI
+        def analysis_thread():
+            # Perform the security analysis
+            self.security_findings = self.perform_security_analysis()
+            
+            # Generate summary
+            self.security_summary = self._generate_security_summary(self.security_findings)
+            
+            # Update the GUI in the main thread
+            self.master.after(0, self.update_security_display)
+            
+            # Make sure the security tab is displayed
+            self.notebook.select(self.security_frame)
+        
+        thread = threading.Thread(target=analysis_thread)
+        thread.daemon = True
+        thread.start()
+
+    def update_security_display(self):
+        """Update security tab displays with analysis results"""
+        # Clear existing items
+        for item in self.findings_tree.get_children():
+            self.findings_tree.delete(item)
+        
+        # Update metrics display
+        counts = self.security_summary['severity_counts']
+        self.metrics['findings_count'].config(text=f"Total Findings: {self.security_summary['total_findings']}")
+        self.metrics['critical_count'].config(text=f"Critical: {counts['critical']}")
+        self.metrics['high_count'].config(text=f"High: {counts['high']}")
+        self.metrics['medium_count'].config(text=f"Medium: {counts['medium']}")
+        self.metrics['low_count'].config(text=f"Low: {counts['low']}")
+        
+        # Update security status
+        if self.security_summary['total_findings'] == 0:
+            status_text = "Status: No issues detected"
+            status_color = "green"
+        else:
+            highest = self.security_summary['highest_severity']
+            status_map = {
+                'critical': ("Status: CRITICAL issues detected", "red"),
+                'high': ("Status: HIGH severity issues detected", "orange"),
+                'medium': ("Status: MEDIUM severity issues detected", "blue"),
+                'low': ("Status: LOW severity issues detected", "green"),
+                'info': ("Status: Informational findings only", "green")
+            }
+            status_text, status_color = status_map.get(highest, ("Status: Unknown", "black"))
+        
+        self.metrics['security_status'].config(text=status_text, foreground=status_color)
+        
+        # Populate findings tree
+        current_filter = self.severity_filter.get().lower()
+        
+        # Ensure security_findings is not None
+        if not self.security_findings:
+            self.security_findings = []
+            
+        # Debug log
+        self._log_debug(f"Updating security display with {len(self.security_findings)} findings")
+        for finding in self.security_findings:
+            self._log_debug(f"Processing finding: {finding.get('type', 'Unknown')} - {finding.get('severity', 'Unknown')}")
+            
+            severity = finding.get('severity', 'info').lower()
+            
+            # Apply filter
+            if current_filter != 'all' and severity != current_filter.lower():
+                continue
+            
+            # Add to tree with appropriate colors
+            severity_colors = {
+                'critical': '#FF0000',  # Red
+                'high': '#FF8C00',      # Dark Orange
+                'medium': '#0066CC',    # Blue
+                'low': '#008000',       # Green
+                'info': '#808080'       # Gray
+            }
+            
+            # Create item in tree
+            item_id = self.findings_tree.insert("", tk.END, 
+                                              values=(finding.get('severity', 'Unknown').upper(), 
+                                                     finding.get('type', 'Unknown'), 
+                                                     finding.get('summary', 'No summary provided')),
+                                              tags=(severity,))
+            
+            # Apply tag for color
+            self.findings_tree.tag_configure(severity, 
+                                           foreground=severity_colors.get(severity, 'black'))
+        
+        # Clear details pane
+        self.clear_finding_details()
+        
+        # Update status
+        self.status_label.config(text="Security analysis complete")
+        
+        # Force UI update
+        self.master.update_idletasks()
+
+    def on_finding_select(self, event):
+        """Handle selection of a finding in the tree"""
+        selection = self.findings_tree.selection()
+        if not selection:
+            return
+        
+        # Get the finding data
+        item_id = selection[0]
+        item_index = self.findings_tree.index(item_id)
+        
+        # Apply the current filter to get the correct index
+        current_filter = self.severity_filter.get().lower()
+        filtered_findings = [f for f in self.security_findings 
+                           if current_filter == 'all' or 
+                           f.get('severity', '').lower() == current_filter]
+        
+        if item_index >= len(filtered_findings):
+            return
+        
+        finding = filtered_findings[item_index]
+        
+        # Update overview text
+        self.overview_text.config(state=tk.NORMAL)
+        self.overview_text.delete(1.0, tk.END)
+        
+        overview = f"""
+        Finding ID: {finding.get('id', 'N/A')}
+        
+        Timestamp: {finding.get('timestamp', 'N/A')}
+        
+        Severity: {finding.get('severity', 'N/A').upper()}
+        
+        Type: {finding.get('type', 'N/A')}
+        
+        Summary:
+        {finding.get('summary', 'N/A')}
+        
+        Description:
+        {finding.get('description', 'N/A')}
+        """
+        
+        self.overview_text.insert(tk.END, overview)
+        self.overview_text.config(state=tk.DISABLED)
+        
+        # Update technical details text
+        self.technical_text.config(state=tk.NORMAL)
+        self.technical_text.delete(1.0, tk.END)
+        
+        technical = f"""
+        Technical Details:
+        {finding.get('technical_details', 'N/A')}
+        
+        Affected Packets:
+        {', '.join(map(str, finding.get('affected_packets', ['N/A'])))}
+        
+        Related IPs:
+        {', '.join(finding.get('related_ips', ['N/A']))}
+        """
+        
+        # Add references if available
+        if 'references' in finding and finding['references']:
+            technical += "\n\nReferences:\n"
+            for ref in finding['references']:
+                technical += f"- {ref.get('title', 'N/A')}: {ref.get('url', 'N/A')}\n"
+        
+        self.technical_text.insert(tk.END, technical)
+        self.technical_text.config(state=tk.DISABLED)
+        
+        # Update recommendations text
+        self.recommendations_text.config(state=tk.NORMAL)
+        self.recommendations_text.delete(1.0, tk.END)
+        
+        recommendations = "Recommendations:\n\n"
+        
+        if 'recommendations' in finding and finding['recommendations']:
+            for i, rec in enumerate(finding['recommendations'], 1):
+                recommendations += f"{i}. {rec}\n\n"
+        else:
+            recommendations += "No specific recommendations available."
+        
+        self.recommendations_text.insert(tk.END, recommendations)
+        self.recommendations_text.config(state=tk.DISABLED)
+
+    def clear_finding_details(self):
+        """Clear the finding details panes"""
+        for text_widget in [self.overview_text, self.technical_text, self.recommendations_text]:
+            text_widget.config(state=tk.NORMAL)
+            text_widget.delete(1.0, tk.END)
+            text_widget.config(state=tk.DISABLED)
+
+    def filter_security_findings(self, event=None):
+        """Filter security findings by severity"""
+        self.update_security_display()
+
+    def export_security_findings(self):
+        """Export security findings to a file"""
+        if not self.security_findings:
+            messagebox.showinfo("Export", "No security findings to export.")
+            return
+        
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")],
+            title="Export Security Findings"
+        )
+        
+        if not filename:
+            return
+        
+        try:
+            with open(filename, "w") as f:
+                # Create export data with metadata
+                export_data = {
+                    "export_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "total_findings": self.security_summary['total_findings'],
+                    "severity_counts": self.security_summary['severity_counts'],
+                    "findings": self.security_findings
+                }
+                
+                # Convert sets to lists for JSON serialization
+                if 'affected_ips' in self.security_summary:
+                    export_data['affected_ips'] = list(self.security_summary['affected_ips'])
+                
+                json.dump(export_data, f, indent=2)
+            
+            messagebox.showinfo("Export", f"Security findings exported to {filename}")
+        
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Error exporting findings: {str(e)}")
+
     def __init__(self, root):
         self.root = root
         self.root.title("Network Sniffer")
@@ -458,6 +944,120 @@ class SnifferGUI:
         # Enable hyperlink functionality for the user-friendly text
         self.user_friendly_text.tag_configure("hyperlink", foreground="blue", underline=1)
         self.user_friendly_text.bind("<Button-1>", self._handle_hyperlink_click)
+        
+        # Security Dashboard tab
+        self.security_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.security_frame, text="Security Dashboard")
+        
+        # Create main security layout with multiple panes
+        security_main_pane = ttk.PanedWindow(self.security_frame, orient=tk.VERTICAL)
+        security_main_pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Security Overview Frame (top)
+        security_overview_frame = ttk.LabelFrame(security_main_pane, text="Security Overview")
+        security_main_pane.add(security_overview_frame, weight=1)
+        
+        # Statistics row (threat level indicators)
+        security_stats_frame = ttk.Frame(security_overview_frame)
+        security_stats_frame.pack(fill=tk.X, expand=False, padx=5, pady=5)
+        
+        # Create statistics indicators
+        self.security_stats = {}
+        
+        # Threat Level indicator
+        threat_frame = ttk.LabelFrame(security_stats_frame, text="Threat Level")
+        threat_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        self.threat_level_var = tk.StringVar(value="Low")
+        self.threat_level_label = ttk.Label(threat_frame, textvariable=self.threat_level_var, 
+                                           font=("Segoe UI", 12, "bold"))
+        self.threat_level_label.pack(side=tk.TOP, pady=5)
+        
+        self.threat_canvas = tk.Canvas(threat_frame, height=30, width=100)
+        self.threat_canvas.pack(side=tk.TOP, pady=5)
+        
+        # Suspicious Packets indicator
+        suspicious_frame = ttk.LabelFrame(security_stats_frame, text="Suspicious Packets")
+        suspicious_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        self.suspicious_count_var = tk.StringVar(value="0")
+        self.suspicious_count_label = ttk.Label(suspicious_frame, textvariable=self.suspicious_count_var, 
+                                              font=("Segoe UI", 12, "bold"))
+        self.suspicious_count_label.pack(side=tk.TOP, pady=5)
+        
+        # Potential Attacks indicator
+        attacks_frame = ttk.LabelFrame(security_stats_frame, text="Potential Attacks")
+        attacks_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        self.attack_count_var = tk.StringVar(value="0")
+        self.attack_count_label = ttk.Label(attacks_frame, textvariable=self.attack_count_var, 
+                                          font=("Segoe UI", 12, "bold"))
+        self.attack_count_label.pack(side=tk.TOP, pady=5)
+        
+        # Malicious IPs indicator
+        malicious_ip_frame = ttk.LabelFrame(security_stats_frame, text="Suspicious IPs")
+        malicious_ip_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        self.malicious_ip_count_var = tk.StringVar(value="0")
+        self.malicious_ip_label = ttk.Label(malicious_ip_frame, textvariable=self.malicious_ip_count_var, 
+                                          font=("Segoe UI", 12, "bold"))
+        self.malicious_ip_label.pack(side=tk.TOP, pady=5)
+        
+        # Bottom pane containing security findings
+        security_findings_pane = ttk.PanedWindow(security_main_pane, orient=tk.HORIZONTAL)
+        security_main_pane.add(security_findings_pane, weight=4)
+        
+        # Left side: Security findings tree
+        security_findings_frame = ttk.LabelFrame(security_findings_pane, text="Security Findings")
+        security_findings_pane.add(security_findings_frame, weight=1)
+        
+        # Create a treeview for security findings
+        findings_columns = ("id", "timestamp", "severity", "type", "summary")
+        self.security_tree = ttk.Treeview(security_findings_frame, columns=findings_columns, show="headings")
+        
+        # Define findings column headings
+        self.security_tree.heading("id", text="#")
+        self.security_tree.heading("timestamp", text="Time")
+        self.security_tree.heading("severity", text="Severity")
+        self.security_tree.heading("type", text="Type")
+        self.security_tree.heading("summary", text="Summary")
+        
+        # Set findings column widths
+        self.security_tree.column("id", width=50)
+        self.security_tree.column("timestamp", width=150)
+        self.security_tree.column("severity", width=80)
+        self.security_tree.column("type", width=120)
+        self.security_tree.column("summary", width=300)
+        
+        # Add a scrollbar for findings
+        findings_scrollbar = ttk.Scrollbar(security_findings_frame, orient=tk.VERTICAL, 
+                                          command=self.security_tree.yview)
+        self.security_tree.configure(yscroll=findings_scrollbar.set)
+        
+        # Pack the findings treeview and scrollbar
+        self.security_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        findings_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Bind selection event to display finding details
+        self.security_tree.bind("<<TreeviewSelect>>", self._on_security_finding_select)
+        
+        # Right side: Finding details explanation
+        finding_details_frame = ttk.LabelFrame(security_findings_pane, text="Finding Details & Recommendations")
+        security_findings_pane.add(finding_details_frame, weight=1)
+        
+        # Text area for finding details with hyperlink support
+        self.finding_details_text = scrolledtext.ScrolledText(finding_details_frame, 
+                                                           font=("Segoe UI", 10), wrap=tk.WORD)
+        self.finding_details_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.finding_details_text.tag_configure("heading", font=("Segoe UI", 11, "bold"))
+        self.finding_details_text.tag_configure("severity_high", foreground="red", font=("Segoe UI", 10, "bold"))
+        self.finding_details_text.tag_configure("severity_medium", foreground="orange", font=("Segoe UI", 10, "bold"))
+        self.finding_details_text.tag_configure("severity_low", foreground="blue", font=("Segoe UI", 10, "bold"))
+        self.finding_details_text.tag_configure("severity_info", foreground="green", font=("Segoe UI", 10))
+        self.finding_details_text.tag_configure("hyperlink", foreground="blue", underline=1)
+        
+        # Bind click event for finding details hyperlinks
+        self.finding_details_text.bind("<Button-1>", self._handle_finding_hyperlink_click)
     
     def _create_statusbar(self):
         """Create the status bar at the bottom of the window"""
@@ -2910,6 +3510,1478 @@ class SnifferGUI:
                 self._log_debug(f"Error processing packet: {str(e)}")
                 import traceback
                 self._log_debug(traceback.format_exc())
+
+    def _handle_finding_hyperlink_click(self, event):
+        """Handle clicks on hyperlinks in the finding details text widget"""
+        try:
+            # Get the position of the click
+            index = self.finding_details_text.index(f"@{event.x},{event.y}")
+            
+            # Get all tags at this position
+            tags = self.finding_details_text.tag_names(index)
+            
+            # Find a tag that looks like a URL
+            for tag in tags:
+                if tag.startswith("http"):
+                    # Open the URL in the default browser
+                    import webbrowser
+                    webbrowser.open(tag)
+                    break
+        except Exception as e:
+            if self.debug_mode:
+                self._log_debug(f"Error handling finding hyperlink click: {str(e)}")
+    
+    def _on_security_finding_select(self, event):
+        """Display details about the selected security finding"""
+        try:
+            # Get the selected item
+            selection = self.security_tree.selection()
+            if not selection:
+                return
+                
+            # Get the finding ID
+            item_id = self.security_tree.item(selection[0], "values")[0]
+            
+            # Find the finding in the findings list
+            finding = None
+            for f in self.security_findings:
+                if f['id'] == int(item_id):
+                    finding = f
+                    break
+                    
+            if not finding:
+                return
+                
+            # Display finding details
+            self._display_finding_details(finding)
+            
+        except Exception as e:
+            if self.debug_mode:
+                self._log_debug(f"Error displaying security finding: {str(e)}")
+    
+    def _display_finding_details(self, finding):
+        """Display detailed information about a security finding"""
+        try:
+            # Clear existing content
+            self.finding_details_text.delete(1.0, tk.END)
+            
+            # Get severity tag
+            severity = finding.get('severity', 'info').lower()
+            severity_tag = f"severity_{severity}"
+            
+            # Add title
+            self.finding_details_text.insert(tk.END, f"{finding.get('summary', 'Unknown Finding')}\n\n", "heading")
+            
+            # Add severity
+            self.finding_details_text.insert(tk.END, f"Severity: ", "bold")
+            self.finding_details_text.insert(tk.END, f"{finding.get('severity', 'Unknown').upper()}\n", severity_tag)
+            
+            # Add timestamp
+            self.finding_details_text.insert(tk.END, f"Detected at: {finding.get('timestamp', 'Unknown')}\n")
+            
+            # Add type
+            self.finding_details_text.insert(tk.END, f"Finding Type: {finding.get('type', 'Unknown')}\n")
+            
+            # Add description
+            self.finding_details_text.insert(tk.END, "\nDescription:\n", "bold")
+            self.finding_details_text.insert(tk.END, f"{finding.get('description', 'No description available.')}\n\n")
+            
+            # Add technical details if available
+            if 'technical_details' in finding:
+                self.finding_details_text.insert(tk.END, "Technical Details:\n", "bold")
+                self.finding_details_text.insert(tk.END, f"{finding['technical_details']}\n\n")
+            
+            # Add affected packets if available
+            if 'affected_packets' in finding and finding['affected_packets']:
+                self.finding_details_text.insert(tk.END, "Affected Packets:\n", "bold")
+                for packet_id in finding['affected_packets']:
+                    self.finding_details_text.insert(tk.END, f"• Packet #{packet_id}\n")
+                self.finding_details_text.insert(tk.END, "\n")
+            
+            # Add IPs or hosts if available
+            if 'related_ips' in finding and finding['related_ips']:
+                self.finding_details_text.insert(tk.END, "Related IP Addresses:\n", "bold")
+                for ip in finding['related_ips']:
+                    self.finding_details_text.insert(tk.END, f"• {ip}\n")
+                self.finding_details_text.insert(tk.END, "\n")
+            
+            # Add recommendations
+            self.finding_details_text.insert(tk.END, "Recommendations:\n", "bold")
+            if 'recommendations' in finding and finding['recommendations']:
+                for rec in finding['recommendations']:
+                    self.finding_details_text.insert(tk.END, f"• {rec}\n")
+            else:
+                self.finding_details_text.insert(tk.END, "No specific recommendations available.\n")
+            
+            # Add reference links if available
+            if 'references' in finding and finding['references']:
+                self.finding_details_text.insert(tk.END, "\nReferences:\n", "bold")
+                for ref in finding['references']:
+                    if isinstance(ref, dict) and 'title' in ref and 'url' in ref:
+                        self._add_finding_hyperlink(ref['title'], ref['url'])
+                    elif isinstance(ref, str) and ref.startswith('http'):
+                        self._add_finding_hyperlink(ref, ref)
+            
+        except Exception as e:
+            self.finding_details_text.delete(1.0, tk.END)
+            self.finding_details_text.insert(tk.END, f"Error displaying finding details: {str(e)}")
+            if self.debug_mode:
+                self._log_debug(f"Error in _display_finding_details: {str(e)}")
+    
+    def _add_finding_hyperlink(self, hyperlink_text, url):
+        """Add a hyperlink to the finding details text widget"""
+        self.finding_details_text.insert(tk.END, "• ")
+        
+        # Store the position where the link starts
+        start_pos = self.finding_details_text.index(tk.INSERT)
+        
+        # Insert the link text
+        self.finding_details_text.insert(tk.END, hyperlink_text, "hyperlink")
+        
+        # Store the position where the link ends
+        end_pos = self.finding_details_text.index(tk.INSERT)
+        
+        # Add the URL as a tag
+        self.finding_details_text.tag_add(url, start_pos, end_pos)
+        
+        # Add a newline after the link
+        self.finding_details_text.insert(tk.END, "\n")
+    
+    def _update_security_dashboard(self):
+        """Update the security dashboard with current findings"""
+        try:
+            # Skip if no packets captured yet
+            if not hasattr(self, 'all_packets') or not self.all_packets:
+                return
+                
+            # Initialize security findings list if not exists
+            if not hasattr(self, 'security_findings'):
+                self.security_findings = []
+            
+            # Analyze current packets for security issues
+            new_findings = self._analyze_security_issues()
+            
+            # Add any new findings to the list
+            if new_findings:
+                self.security_findings.extend(new_findings)
+                
+                # Update the security tree with new findings
+                for finding in new_findings:
+                    self.security_tree.insert("", "end", values=(
+                        finding['id'],
+                        finding['timestamp'],
+                        finding['severity'],
+                        finding['type'],
+                        finding['summary']
+                    ))
+            
+            # Update security statistics
+            self._update_security_stats()
+            
+            # Update threat level indicator
+            self._update_threat_level()
+            
+        except Exception as e:
+            if self.debug_mode:
+                self._log_debug(f"Error updating security dashboard: {str(e)}")
+                import traceback
+                self._log_debug(traceback.format_exc())
+    
+    def _update_security_stats(self):
+        """Update the security statistics indicators"""
+        try:
+            # Count suspicious packets
+            suspicious_count = sum(1 for f in self.security_findings if f['severity'] in ['low', 'medium', 'high'])
+            self.suspicious_count_var.set(str(suspicious_count))
+            
+            # Count potential attacks
+            attack_count = sum(1 for f in self.security_findings if 'attack' in f['type'].lower())
+            self.attack_count_var.set(str(attack_count))
+            
+            # Count unique suspicious IPs
+            suspicious_ips = set()
+            for finding in self.security_findings:
+                if 'related_ips' in finding:
+                    suspicious_ips.update(finding['related_ips'])
+            self.malicious_ip_count_var.set(str(len(suspicious_ips)))
+            
+        except Exception as e:
+            if self.debug_mode:
+                self._log_debug(f"Error updating security stats: {str(e)}")
+    
+    def _update_threat_level(self):
+        """Update the threat level indicator based on findings"""
+        try:
+            # Count findings by severity
+            high_count = sum(1 for f in self.security_findings if f['severity'] == 'high')
+            medium_count = sum(1 for f in self.security_findings if f['severity'] == 'medium')
+            low_count = sum(1 for f in self.security_findings if f['severity'] == 'low')
+            
+            # Determine overall threat level
+            if high_count > 0:
+                threat_level = "High"
+                color = "#ff0000"  # Red
+            elif medium_count > 2:
+                threat_level = "Medium"
+                color = "#ffa500"  # Orange
+            elif medium_count > 0 or low_count > 5:
+                threat_level = "Low"
+                color = "#ffff00"  # Yellow
+            else:
+                threat_level = "Minimal"
+                color = "#00ff00"  # Green
+            
+            # Update the threat level label
+            self.threat_level_var.set(threat_level)
+            
+            # Update threat indicator on canvas
+            self.threat_canvas.delete("all")
+            self.threat_canvas.create_rectangle(0, 0, 100, 30, fill=color, outline="")
+            
+        except Exception as e:
+            if self.debug_mode:
+                self._log_debug(f"Error updating threat level: {str(e)}")
+    
+    def _analyze_security_issues(self):
+        """Analyze packets for security issues and return new findings"""
+        try:
+            # Return early if no packets
+            if not self.all_packets:
+                return []
+                
+            # Get the highest finding ID so far
+            next_id = 1
+            if self.security_findings:
+                next_id = max(f['id'] for f in self.security_findings) + 1
+                
+            # Get timestamp for new findings
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Track which packets we've already analyzed
+            if not hasattr(self, 'analyzed_packet_ids'):
+                self.analyzed_packet_ids = set()
+                
+            # Find packets we haven't analyzed yet
+            new_packet_ids = set(p['id'] for p in self.all_packets) - self.analyzed_packet_ids
+            if not new_packet_ids:
+                return []  # No new packets to analyze
+                
+            # Get new packets
+            new_packets = [p for p in self.all_packets if p['id'] in new_packet_ids]
+            
+            # Add these packets to the analyzed set
+            self.analyzed_packet_ids.update(new_packet_ids)
+            
+            # List to hold new findings
+            new_findings = []
+            
+            # Run detection modules
+            self._detect_port_scans(new_packets, new_findings, next_id, timestamp)
+            next_id += len(new_findings)
+            
+            self._detect_suspicious_flags(new_packets, new_findings, next_id, timestamp)
+            next_id += len(new_findings)
+            
+            self._detect_malware_communication(new_packets, new_findings, next_id, timestamp)
+            next_id += len(new_findings)
+            
+            self._detect_data_exfiltration(new_packets, new_findings, next_id, timestamp)
+            next_id += len(new_findings)
+            
+            self._detect_brute_force(new_packets, new_findings, next_id, timestamp)
+            
+            return new_findings
+            
+        except Exception as e:
+            if self.debug_mode:
+                self._log_debug(f"Error analyzing security issues: {str(e)}")
+                import traceback
+                self._log_debug(traceback.format_exc())
+            return []
+
+    def _detect_port_scans(self, packets, findings, next_id, timestamp):
+        """
+        Detect port scanning activity in the packet capture
+        """
+        self._log_debug("Detecting port scanning activity")
+        
+        # Track connections by source IP to destination IP:port
+        scan_tracking = {}
+        packet_indices = {}
+        
+        # Define scan thresholds
+        PORT_SCAN_THRESHOLD = 10  # Number of unique ports to trigger detection
+        TIME_WINDOW = 10          # Time window in seconds to consider for port scans
+        
+        # First pass - collect data about port access patterns
+        for i, packet in enumerate(packets):
+            if 'IP' in packet and ('TCP' in packet or 'UDP' in packet):
+                src_ip = packet['IP'].src
+                dst_ip = packet['IP'].dst
+                
+                if 'TCP' in packet:
+                    dst_port = packet['TCP'].dport
+                    flags = packet['TCP'].flags
+                    proto = 'TCP'
+                    # Only count SYN packets for TCP (typical for scans)
+                    if flags != 2:  # SYN flag value is 2
+                        continue
+                elif 'UDP' in packet:
+                    dst_port = packet['UDP'].dport
+                    proto = 'UDP'
+                else:
+                    continue
+                
+                # Create a key for this source IP
+                src_key = src_ip
+                
+                # Initialize tracking for this source if needed
+                if src_key not in scan_tracking:
+                    scan_tracking[src_key] = {
+                        'targets': {},
+                        'packet_time': packet.time,
+                        'packets': []
+                    }
+                
+                # Update time to the most recent packet
+                scan_tracking[src_key]['packet_time'] = packet.time
+                
+                # Add to packet indices
+                scan_tracking[src_key]['packets'].append(i)
+                
+                # Create target key
+                target_key = f"{dst_ip}:{proto}"
+                
+                # Initialize target tracking if needed
+                if target_key not in scan_tracking[src_key]['targets']:
+                    scan_tracking[src_key]['targets'][target_key] = {
+                        'ports': set(),
+                        'ip': dst_ip,
+                        'proto': proto
+                    }
+                
+                # Add the port to the set
+                scan_tracking[src_key]['targets'][target_key]['ports'].add(dst_port)
+        
+        # Second pass - analyze for port scanning patterns
+        for src_ip, data in scan_tracking.items():
+            for target_key, target_data in data['targets'].items():
+                # If enough unique ports were scanned, flag as port scan
+                if len(target_data['ports']) >= PORT_SCAN_THRESHOLD:
+                    # Create a finding ID
+                    finding_id = f"PORTSCAN-{next_id}"
+                    next_id += 1
+                    
+                    # Sort ports for better display
+                    sorted_ports = sorted(target_data['ports'])
+                    
+                    # Determine if this is a specific type of scan
+                    common_ports = [20, 21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389, 5900, 8080]
+                    common_ports_count = sum(1 for port in target_data['ports'] if port in common_ports)
+                    common_ports_ratio = common_ports_count / len(target_data['ports']) if target_data['ports'] else 0
+                    
+                    is_sequential = self._is_sequential_scan(sorted_ports)
+                    scan_types = []
+                    
+                    if common_ports_ratio > 0.8:
+                        scan_types.append("common services scan")
+                    elif is_sequential:
+                        scan_types.append("sequential port scan")
+                    else:
+                        port_ranges = self._identify_port_ranges(sorted_ports)
+                        if len(port_ranges) == 1 and port_ranges[0][1] - port_ranges[0][0] > 200:
+                            scan_types.append(f"range scan ({port_ranges[0][0]}-{port_ranges[0][1]})")
+                        else:
+                            scan_types.append("randomized port scan")
+                    
+                    scan_type_str = ", ".join(scan_types)
+                    
+                    # Determine severity based on scan type and scale
+                    if len(target_data['ports']) > 100:
+                        severity = 'high'  # Large-scale scan
+                    elif common_ports_ratio > 0.8:
+                        severity = 'medium'  # Targeted at common services
+                    else:
+                        severity = 'low'  # Smaller scan
+                    
+                    # Create a meaningful summary
+                    summary = f"Port scan detected from {src_ip} to {target_data['ip']} ({len(target_data['ports'])} ports)"
+                    
+                    # Construct detailed description
+                    description = f"Detected a {scan_type_str} from {src_ip} targeting {target_data['ip']} using {target_data['proto']}. The scan covered {len(target_data['ports'])} unique ports."
+                    
+                    # Add port range information
+                    port_ranges = self._identify_port_ranges(sorted_ports)
+                    if port_ranges:
+                        range_str = ", ".join([f"{start}-{end}" for start, end in port_ranges])
+                        description += f"\n\nThe scan covered the following port ranges: {range_str}"
+                    else:
+                        port_list = ", ".join(str(p) for p in sorted(list(target_data['ports']))[:20])
+                        if len(target_data['ports']) > 20:
+                            port_list += f", ... ({len(target_data['ports']) - 20} more)"
+                        description += f"\n\nSample of scanned ports: {port_list}"
+                    
+                    # Technical details
+                    technical_details = f"Scan details:\n"
+                    technical_details += f"- Source IP: {src_ip}\n"
+                    technical_details += f"- Target IP: {target_data['ip']}\n"
+                    technical_details += f"- Protocol: {target_data['proto']}\n"
+                    technical_details += f"- Unique ports scanned: {len(target_data['ports'])}\n"
+                    technical_details += f"- Scan type: {scan_type_str}\n\n"
+                    
+                    # Add information about port distribution
+                    port_categories = {
+                        'well_known': sum(1 for p in target_data['ports'] if p < 1024),
+                        'registered': sum(1 for p in target_data['ports'] if 1024 <= p < 49152),
+                        'dynamic': sum(1 for p in target_data['ports'] if p >= 49152)
+                    }
+                    
+                    technical_details += "Port distribution:\n"
+                    technical_details += f"- Well-known ports (0-1023): {port_categories['well_known']}\n"
+                    technical_details += f"- Registered ports (1024-49151): {port_categories['registered']}\n"
+                    technical_details += f"- Dynamic ports (49152-65535): {port_categories['dynamic']}\n\n"
+                    
+                    # Add common service ports if they were scanned
+                    common_scanned = [p for p in common_ports if p in target_data['ports']]
+                    if common_scanned:
+                        service_map = {
+                            20: 'FTP Data', 21: 'FTP Control', 22: 'SSH', 23: 'Telnet',
+                            25: 'SMTP', 53: 'DNS', 80: 'HTTP', 110: 'POP3',
+                            111: 'RPC', 135: 'MS RPC', 139: 'NetBIOS', 143: 'IMAP',
+                            443: 'HTTPS', 445: 'SMB', 993: 'IMAPS', 995: 'POP3S',
+                            1723: 'PPTP', 3306: 'MySQL', 3389: 'RDP', 5900: 'VNC',
+                            8080: 'HTTP Proxy'
+                        }
+                        
+                        technical_details += "Common services scanned:\n"
+                        for port in common_scanned:
+                            service = service_map.get(port, 'Unknown Service')
+                            technical_details += f"- Port {port}: {service}\n"
+                    
+                    # Recommendations based on finding
+                    recommendations = [
+                        "Review your firewall rules to ensure unnecessary ports are closed.",
+                        "Investigate the source IP to determine if this is a legitimate scan (e.g., from security team) or potential reconnaissance activity.",
+                        "Consider implementing rate limiting or other protective measures against port scans.",
+                        "Ensure all services running on scanned ports have up-to-date security patches."
+                    ]
+                    
+                    # References for further information
+                    references = [
+                        {
+                            "title": "MITRE ATT&CK: Network Service Scanning (T1046)",
+                            "url": "https://attack.mitre.org/techniques/T1046/"
+                        },
+                        {
+                            "title": "Understanding Port Scanning",
+                            "url": "https://nmap.org/book/man-port-scanning-basics.html"
+                        }
+                    ]
+                    
+                    # Create the finding
+                    finding = {
+                        'id': finding_id,
+                        'timestamp': timestamp,
+                        'severity': severity,
+                        'type': 'Port Scan',
+                        'summary': summary,
+                        'description': description,
+                        'technical_details': technical_details,
+                        'recommendations': recommendations,
+                        'affected_packets': data['packets'],
+                        'related_ips': [src_ip, target_data['ip']],
+                        'references': references
+                    }
+                    
+                    findings.append(finding)
+        
+        return next_id
+    
+    def _is_sequential_scan(self, ports):
+        """Check if ports are mostly sequential"""
+        if not ports or len(ports) < 5:
+            return False
+        
+        # Check if at least 80% of ports are sequential
+        sequential_count = 0
+        for i in range(1, len(ports)):
+            if ports[i] == ports[i-1] + 1:
+                sequential_count += 1
+        
+        return sequential_count >= 0.8 * (len(ports) - 1)
+    
+    def _identify_port_ranges(self, ports):
+        """
+        Identify contiguous port ranges from a list of ports
+        Returns a list of tuples (start_port, end_port)
+        """
+        if not ports:
+            return []
+        
+        # Sort ports first
+        sorted_ports = sorted(ports)
+        
+        ranges = []
+        range_start = sorted_ports[0]
+        prev_port = sorted_ports[0]
+        
+        for port in sorted_ports[1:]:
+            # If there's a gap larger than 1, end the current range
+            if port > prev_port + 1:
+                ranges.append((range_start, prev_port))
+                range_start = port
+            prev_port = port
+        
+        # Add the last range
+        ranges.append((range_start, prev_port))
+        
+        # Consolidate small ranges (less than 5 ports) into individual ports
+        consolidated = []
+        for start, end in ranges:
+            if end - start >= 4:  # Range has at least 5 ports
+                consolidated.append((start, end))
+        
+        return consolidated
+
+    def _detect_suspicious_flags(self, packets, findings, next_id, timestamp):
+        """
+        Detect suspicious TCP flag combinations that may indicate scanning or evasion techniques
+        """
+        self._log_debug("Detecting suspicious TCP flags")
+        
+        # Define suspicious flag combinations
+        suspicious_flags = {
+            'null_scan': 0,                        # No flags (NULL scan)
+            'fin_scan': 0x01,                      # FIN scan
+            'xmas_scan': 0x29,                     # FIN, PSH, URG (XMAS scan)
+            'maimon_scan': 0x05,                   # FIN, ACK (Maimon scan)
+            'syn_fin': 0x03,                       # SYN, FIN (invalid combination)
+            'all_flags': 0x3F,                     # All flags set (invalid in normal traffic)
+            'ack_scan': 0x10,                      # ACK scan
+            'urg_psh_scan': 0x28,                  # URG, PSH (uncommon)
+            'urg_fin_scan': 0x21,                  # URG, FIN (uncommon)
+            'rst_scan': 0x04                       # RST scan
+        }
+        
+        # Track suspicious packets by source IP
+        suspicious_packets = {}
+        
+        # Analyze each packet for suspicious flags
+        for i, packet in enumerate(packets):
+            if 'IP' in packet and 'TCP' in packet:
+                src_ip = packet['IP'].src
+                dst_ip = packet['IP'].dst
+                dst_port = packet['TCP'].dport
+                flags = packet['TCP'].flags
+                
+                # Check for suspicious flag combinations
+                scan_type = None
+                for scan_name, flag_value in suspicious_flags.items():
+                    if flags == flag_value:
+                        scan_type = scan_name
+                        break
+                
+                if scan_type:
+                    # Track by source IP
+                    if src_ip not in suspicious_packets:
+                        suspicious_packets[src_ip] = {
+                            'packets': [],
+                            'targets': set(),
+                            'scan_types': set(),
+                            'ports': set()
+                        }
+                    
+                    # Add to tracking
+                    suspicious_packets[src_ip]['packets'].append(i)
+                    suspicious_packets[src_ip]['targets'].add(dst_ip)
+                    suspicious_packets[src_ip]['scan_types'].add(scan_type)
+                    suspicious_packets[src_ip]['ports'].add(dst_port)
+        
+        # Generate findings for sources with suspicious packets
+        for src_ip, data in suspicious_packets.items():
+            # Only create a finding if there are enough suspicious packets
+            if len(data['packets']) >= 3:
+                # Create a finding ID
+                finding_id = f"SCANFLAG-{next_id}"
+                next_id += 1
+                
+                # Convert sets to sorted lists for display
+                target_ips = sorted(list(data['targets']))
+                scan_types = sorted(list(data['scan_types']))
+                ports = sorted(list(data['ports']))
+                
+                # Format scan types for display
+                scan_names = {
+                    'null_scan': "NULL scan (no flags)",
+                    'fin_scan': "FIN scan",
+                    'xmas_scan': "XMAS scan (FIN, PSH, URG)",
+                    'maimon_scan': "Maimon scan (FIN, ACK)",
+                    'syn_fin': "SYN-FIN scan (invalid flags)",
+                    'all_flags': "All flags set scan",
+                    'ack_scan': "ACK scan",
+                    'urg_psh_scan': "URG-PSH scan",
+                    'urg_fin_scan': "URG-FIN scan",
+                    'rst_scan': "RST scan"
+                }
+                
+                scan_types_display = [scan_names.get(st, st) for st in scan_types]
+                
+                # Determine severity based on scan type and scale
+                if 'xmas_scan' in scan_types or 'null_scan' in scan_types or 'syn_fin' in scan_types:
+                    severity = 'high'  # More sophisticated scan techniques
+                elif len(data['packets']) > 10:
+                    severity = 'medium'  # Multiple suspicious packets
+                else:
+                    severity = 'low'  # Few suspicious packets
+                
+                # Create a meaningful summary
+                if len(scan_types) == 1:
+                    summary = f"Detected {scan_names.get(scan_types[0], scan_types[0])} from {src_ip}"
+                else:
+                    summary = f"Multiple suspicious scan techniques detected from {src_ip}"
+                
+                # Construct detailed description
+                description = f"Detected {len(data['packets'])} packets with suspicious TCP flag combinations sent from {src_ip} to {len(target_ips)} unique target IPs."
+                
+                if len(scan_types) == 1:
+                    description += f"\n\nThe scan technique appears to be a {scan_names.get(scan_types[0], scan_types[0])}, which is often used for stealth scanning to evade detection by simple firewall rules."
+                else:
+                    description += f"\n\nMultiple scanning techniques were detected: {', '.join(scan_types_display)}. This suggests a deliberate port scanning activity using advanced techniques."
+                
+                # Add target information
+                if len(target_ips) <= 5:
+                    description += f"\n\nTarget IPs: {', '.join(target_ips)}"
+                else:
+                    description += f"\n\nTarget IPs include: {', '.join(target_ips[:5])} and {len(target_ips) - 5} more."
+                
+                # Technical details
+                technical_details = f"Scan details:\n"
+                technical_details += f"- Source IP: {src_ip}\n"
+                technical_details += f"- Suspicious packets: {len(data['packets'])}\n"
+                technical_details += f"- Unique targets: {len(target_ips)}\n"
+                technical_details += f"- Scan techniques: {', '.join(scan_types_display)}\n\n"
+                
+                # Add explanation of the techniques
+                technical_details += "Technique explanations:\n"
+                for st in scan_types:
+                    if st == 'null_scan':
+                        technical_details += "- NULL scan: No TCP flags set. This can bypass simple firewall rules that filter based on specific flags.\n"
+                    elif st == 'fin_scan':
+                        technical_details += "- FIN scan: Only the FIN flag is set. Closed ports often respond to these with RST packets, while open ports may drop them.\n"
+                    elif st == 'xmas_scan':
+                        technical_details += "- XMAS scan: FIN, PSH, and URG flags are set, making the packet 'lit up like a Christmas tree'. Used for stealth scanning.\n"
+                    elif st == 'maimon_scan':
+                        technical_details += "- Maimon scan: FIN and ACK flags set. A specialized technique named after its discoverer.\n"
+                    elif st == 'syn_fin':
+                        technical_details += "- SYN-FIN scan: Both SYN and FIN flags set, which is invalid in normal TCP. May bypass certain filters.\n"
+                    elif st == 'all_flags':
+                        technical_details += "- All flags scan: All TCP flags set at once, which is highly unusual in legitimate traffic.\n"
+                    elif st == 'ack_scan':
+                        technical_details += "- ACK scan: Only the ACK flag is set. Used to map firewall rulesets and identify filtering behavior.\n"
+                    elif st == 'urg_psh_scan':
+                        technical_details += "- URG-PSH scan: URG and PSH flags set. Uncommon in normal traffic and may indicate scanning activity.\n"
+                    elif st == 'urg_fin_scan':
+                        technical_details += "- URG-FIN scan: URG and FIN flags set. Another uncommon combination used in stealth scanning.\n"
+                    elif st == 'rst_scan':
+                        technical_details += "- RST scan: Only the RST flag is set. Unusual as a first packet in a connection and may indicate scanning.\n"
+                
+                # Add port information
+                if ports:
+                    port_ranges = self._identify_port_ranges(ports)
+                    if port_ranges:
+                        range_str = ", ".join([f"{start}-{end}" for start, end in port_ranges])
+                        technical_details += f"\nPort ranges scanned: {range_str}\n"
+                    else:
+                        port_list = ", ".join(str(p) for p in ports[:20])
+                        if len(ports) > 20:
+                            port_list += f", ... ({len(ports) - 20} more)"
+                        technical_details += f"\nPorts scanned: {port_list}\n"
+                
+                # Recommendations based on finding
+                recommendations = [
+                    "Configure your firewall to detect and block these types of scans.",
+                    "Monitor the source IP for further suspicious activity.",
+                    "Consider implementing IDS/IPS systems that can detect advanced scanning techniques.",
+                    "Use a stateful firewall that can properly track TCP connection states."
+                ]
+                
+                # References for further information
+                references = [
+                    {
+                        "title": "MITRE ATT&CK: Network Service Scanning (T1046)",
+                        "url": "https://attack.mitre.org/techniques/T1046/"
+                    },
+                    {
+                        "title": "TCP Flag Scans and Their Detection",
+                        "url": "https://nmap.org/book/man-port-scanning-techniques.html"
+                    },
+                    {
+                        "title": "Stealth Port Scanning Methods",
+                        "url": "https://www.sans.org/reading-room/whitepapers/testing/stealth-port-scanning-methods-32514"
+                    }
+                ]
+                
+                # Create the finding
+                finding = {
+                    'id': finding_id,
+                    'timestamp': timestamp,
+                    'severity': severity,
+                    'type': 'Suspicious TCP Flags',
+                    'summary': summary,
+                    'description': description,
+                    'technical_details': technical_details,
+                    'recommendations': recommendations,
+                    'affected_packets': data['packets'],
+                    'related_ips': [src_ip] + target_ips[:5],  # Include source and up to 5 targets
+                    'references': references
+                }
+                
+                findings.append(finding)
+        
+        return next_id
+
+    def _detect_malware_communication(self, packets, findings, next_id, timestamp):
+        """
+        Detect potential malware communication patterns in packets
+        """
+        self._log_debug("Detecting malware communication patterns")
+        
+        # Known malicious IP ranges and domains (for demonstration purposes)
+        # In a real tool, this would be regularly updated from threat intelligence feeds
+        malicious_ips = [
+            '185.147.14.0/24',   # Example range - not necessarily real malicious IPs  
+            '103.35.74.0/24',    # Example range
+            '91.92.136.0/24',    # Example range
+            '192.0.2.1',         # Documentation example IP
+            '198.51.100.23',     # Documentation example IP  
+            '203.0.113.42'       # Documentation example IP
+        ]
+        
+        malicious_domains = [
+            'evil-malware.example',
+            'ransomware.test',
+            'malicious.local',
+            'badware.invalid'
+        ]
+        
+        # Common C2 ports
+        c2_ports = [
+            4444,  # Metasploit
+            1080,  # SOCKS proxy
+            8080,  # Alternative HTTP
+            8443,  # Alternative HTTPS
+            6666,  # IRC alternative
+            4343,  # Common trojan port
+            31337, # Elite port used by backdoors
+        ]
+        
+        # Malicious patterns in payloads
+        malicious_patterns = [
+            rb'(?i)\\x00CMD\\x00',             # Command injection marker
+            rb'(?i)(eval|system|exec)\s*\([\'"]', # PHP shell command execution  
+            rb'(?i)<script>.*?<\/script>',     # Suspicious script tags
+            rb'(?i)(?:fromcharcode|eval\(|\\x[0-9a-f]{2}\\x[0-9a-f]{2}\\x[0-9a-f]{2})', # Obfuscation
+            rb'(?i)(?:powershell|cmd\.exe|bash|\/bin\/sh)\s+-[ce]', # Command line execution
+        ]
+        
+        # Create IP network objects for CIDR notation
+        ip_networks = []
+        for ip in malicious_ips:
+            try:
+                if '/' in ip:
+                    # This is a network range in CIDR notation
+                    ip_networks.append(ip)
+                else:
+                    # Single IP address
+                    ip_networks.append(ip)
+            except Exception as e:
+                self._log_debug(f"Error processing malicious IP {ip}: {str(e)}")
+        
+        # Track suspicious connections
+        suspicious_connections = {}
+        packet_indices = {}
+        
+        # Analyze each packet
+        for i, packet in enumerate(packets):
+            if 'IP' in packet and ('TCP' in packet or 'UDP' in packet):
+                src_ip = packet['IP'].src
+                dst_ip = packet['IP'].dst
+                
+                # Check if destination IP matches any malicious IP or network
+                is_malicious_ip = False
+                for network in ip_networks:
+                    if '/' in network:
+                        # Check if the IP falls within this network range
+                        # A proper implementation would use ipaddress module for this check
+                        network_base = network.split('/')[0]
+                        if dst_ip.startswith(network_base.rsplit('.', 1)[0]):
+                            is_malicious_ip = True
+                            break
+                    elif dst_ip == network:
+                        is_malicious_ip = True
+                        break
+                
+                # Extract protocol specific information
+                if 'TCP' in packet:
+                    src_port = packet['TCP'].sport
+                    dst_port = packet['TCP'].dport
+                    proto = 'TCP'
+                elif 'UDP' in packet:
+                    src_port = packet['UDP'].sport
+                    dst_port = packet['UDP'].dport
+                    proto = 'UDP'
+                else:
+                    continue
+                
+                # Check for suspicious port usage
+                is_c2_port = dst_port in c2_ports
+                
+                # Check for malicious DNS lookups
+                is_malicious_domain = False
+                domain_requested = None
+                if 'DNS' in packet and hasattr(packet['DNS'], 'qd') and packet['DNS'].qd:
+                    for query in packet['DNS'].qd:
+                        if hasattr(query, 'qname'):
+                            domain = query.qname.decode('utf-8', errors='ignore').lower().rstrip('.')
+                            domain_requested = domain
+                            for bad_domain in malicious_domains:
+                                if bad_domain in domain:
+                                    is_malicious_domain = True
+                                    break
+                            if is_malicious_domain:
+                                break
+                
+                # Check for malicious payload patterns
+                has_malicious_pattern = False
+                matched_pattern = None
+                if Raw in packet:
+                    payload = bytes(packet[Raw].load)
+                    for pattern in malicious_patterns:
+                        if re.search(pattern, payload):
+                            has_malicious_pattern = True
+                            matched_pattern = pattern
+                            break
+                
+                # Flag the connection if any suspicious indicator is found
+                if is_malicious_ip or is_c2_port or is_malicious_domain or has_malicious_pattern:
+                    conn_key = f"{src_ip}:{src_port}-{dst_ip}:{dst_port}-{proto}"
+                    
+                    if conn_key not in suspicious_connections:
+                        suspicious_connections[conn_key] = {
+                            'src_ip': src_ip,
+                            'dst_ip': dst_ip,
+                            'src_port': src_port,
+                            'dst_port': dst_port,
+                            'protocol': proto,
+                            'first_seen': timestamp,
+                            'packet_count': 1,
+                            'reasons': set(),
+                            'domain': domain_requested,
+                            'pattern': matched_pattern,
+                            'packets': [i]
+                        }
+                    else:
+                        suspicious_connections[conn_key]['packet_count'] += 1
+                        suspicious_connections[conn_key]['packets'].append(i)
+                    
+                    # Add reasons for flagging
+                    reasons = suspicious_connections[conn_key]['reasons']
+                    if is_malicious_ip:
+                        reasons.add('malicious_ip')
+                    if is_c2_port:
+                        reasons.add('c2_port')
+                    if is_malicious_domain:
+                        reasons.add('malicious_domain')
+                    if has_malicious_pattern:
+                        reasons.add('malicious_pattern')
+        
+        # Generate findings for suspicious connections
+        for conn_key, conn_info in suspicious_connections.items():
+            # Create a finding ID
+            finding_id = f"MALWARE-{next_id}"
+            next_id += 1
+            
+            # Determine severity based on evidence
+            reasons = conn_info['reasons']
+            if 'malicious_pattern' in reasons or len(reasons) > 1:
+                severity = 'critical'
+            elif 'malicious_ip' in reasons or 'malicious_domain' in reasons:
+                severity = 'high'
+            else:
+                severity = 'medium'
+            
+            # Create a meaningful summary
+            if 'malicious_domain' in reasons:
+                summary = f"Potential malware communication to malicious domain: {conn_info['domain']}"
+            elif 'malicious_ip' in reasons:
+                summary = f"Communication with known malicious IP address: {conn_info['dst_ip']}"
+            elif 'malicious_pattern' in reasons:
+                summary = f"Malicious payload detected in communication"
+            else:
+                summary = f"Suspicious communication using potential C2 port {conn_info['dst_port']}"
+            
+            # Construct detailed description
+            description = f"Detected potentially malicious network traffic between {conn_info['src_ip']}:{conn_info['src_port']} and {conn_info['dst_ip']}:{conn_info['dst_port']} using {conn_info['protocol']}."
+            
+            # Add specific details based on the reasons
+            if 'malicious_ip' in reasons:
+                description += f"\n\nThe destination IP address {conn_info['dst_ip']} matches a known malicious IP address or range."
+            
+            if 'c2_port' in reasons:
+                description += f"\n\nThe destination port {conn_info['dst_port']} is commonly used for command and control (C2) communication."
+            
+            if 'malicious_domain' in reasons:
+                description += f"\n\nThe DNS query for domain {conn_info['domain']} matches a known malicious domain pattern."
+            
+            if 'malicious_pattern' in reasons:
+                description += f"\n\nThe packet payload contains patterns indicative of malicious activity or exploitation attempts."
+            
+            # Technical details
+            technical_details = f"Connection details:\n"
+            technical_details += f"- Source IP: {conn_info['src_ip']}\n"
+            technical_details += f"- Source Port: {conn_info['src_port']}\n"
+            technical_details += f"- Destination IP: {conn_info['dst_ip']}\n"
+            technical_details += f"- Destination Port: {conn_info['dst_port']}\n"
+            technical_details += f"- Protocol: {conn_info['protocol']}\n"
+            technical_details += f"- First seen: {conn_info['first_seen']}\n"
+            technical_details += f"- Packet count: {conn_info['packet_count']}\n\n"
+            
+            technical_details += "Detection reasons:\n"
+            for reason in reasons:
+                technical_details += f"- {reason.replace('_', ' ').title()}\n"
+            
+            if conn_info['domain']:
+                technical_details += f"\nDomain requested: {conn_info['domain']}\n"
+            
+            if conn_info['pattern']:
+                technical_details += f"\nMatched pattern: {str(conn_info['pattern'])}\n"
+            
+            # Recommendations based on finding
+            recommendations = [
+                "Block communication with the identified IP address or domain at your firewall or security gateway.",
+                "Scan the source system for malware using an up-to-date antivirus scanner.",
+                "Check system logs for signs of compromise or unusual activity.",
+                "If communication was from a critical system, consider isolating it for further investigation."
+            ]
+            
+            # References for further information
+            references = [
+                {
+                    "title": "MITRE ATT&CK: Command and Control",
+                    "url": "https://attack.mitre.org/tactics/TA0011/"
+                },
+                {
+                    "title": "Understanding Malware Command and Control Channels",
+                    "url": "https://www.sans.org/reading-room/whitepapers/detection/understanding-command-control-channels-malware-detection-32969"
+                }
+            ]
+            
+            # Create the finding
+            finding = {
+                'id': finding_id,
+                'timestamp': timestamp,
+                'severity': severity,
+                'type': 'Malware Communication',
+                'summary': summary,
+                'description': description,
+                'technical_details': technical_details,
+                'recommendations': recommendations,
+                'affected_packets': conn_info['packets'],
+                'related_ips': [conn_info['src_ip'], conn_info['dst_ip']],
+                'references': references
+            }
+            
+            findings.append(finding)
+        
+        return next_id
+
+    def _detect_data_exfiltration(self, packets, findings, next_id, timestamp):
+        """
+        Detect potential data exfiltration by analyzing outbound data volumes and patterns
+        """
+        self._log_debug("Detecting data exfiltration patterns")
+        
+        # Define thresholds and detection parameters
+        VOLUME_THRESHOLD = 1000000  # 1MB in bytes 
+        DNS_QUERY_LENGTH_THRESHOLD = 50  # Suspicious DNS query length
+        DNS_TXT_THRESHOLD = 5  # Number of DNS TXT queries to flag
+        ICMP_DATA_THRESHOLD = 500  # Bytes of ICMP data
+        HTTP_POST_THRESHOLD = 500000  # 500KB HTTP POST
+        
+        # Unusual destination ports that could indicate tunneling
+        unusual_ports = [53, 123, 1900, 67, 68, 5353, 137, 161, 162]
+        
+        # Track data flows by connection
+        data_flows = {}
+        dns_queries = {}
+        icmp_data = {}
+        
+        # Track local subnets to identify outbound traffic
+        local_subnets = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8"]
+        
+        # Analyze each packet
+        for i, packet in enumerate(packets):
+            if 'IP' in packet:
+                src_ip = packet['IP'].src
+                dst_ip = packet['IP'].dst
+                
+                # Check if source is local and destination is external
+                is_src_local = any(self._ip_in_subnet(src_ip, subnet) for subnet in local_subnets)
+                is_dst_local = any(self._ip_in_subnet(dst_ip, subnet) for subnet in local_subnets)
+                
+                if is_src_local and not is_dst_local:
+                    # Track TCP/UDP data flows
+                    if 'TCP' in packet or 'UDP' in packet:
+                        proto = 'TCP' if 'TCP' in packet else 'UDP'
+                        src_port = packet[proto].sport
+                        dst_port = packet[proto].dport
+                        
+                        # Create connection key
+                        conn_key = f"{src_ip}:{src_port}-{dst_ip}:{dst_port}-{proto}"
+                        
+                        # Initialize connection tracking
+                        if conn_key not in data_flows:
+                            data_flows[conn_key] = {
+                                'src_ip': src_ip,
+                                'dst_ip': dst_ip,
+                                'src_port': src_port,
+                                'dst_port': dst_port,
+                                'protocol': proto,
+                                'bytes_out': 0,
+                                'packet_count': 0,
+                                'start_time': packet.time,
+                                'last_time': packet.time,
+                                'packets': []
+                            }
+                        
+                        # Calculate payload size
+                        payload_size = 0
+                        if Raw in packet:
+                            payload_size = len(packet[Raw].load)
+                        
+                        # Update flow statistics
+                        data_flows[conn_key]['bytes_out'] += payload_size
+                        data_flows[conn_key]['packet_count'] += 1
+                        data_flows[conn_key]['last_time'] = packet.time
+                        data_flows[conn_key]['packets'].append(i)
+                    
+                    # Track ICMP data
+                    elif 'ICMP' in packet and Raw in packet:
+                        icmp_payload = packet[Raw].load
+                        
+                        if src_ip not in icmp_data:
+                            icmp_data[src_ip] = {
+                                'destinations': {},
+                                'total_bytes': 0,
+                                'packets': []
+                            }
+                        
+                        icmp_data[src_ip]['packets'].append(i)
+                        icmp_data[src_ip]['total_bytes'] += len(icmp_payload)
+        
+        # Create findings for large data transfers
+        for conn_key, flow in data_flows.items():
+            if flow['bytes_out'] > VOLUME_THRESHOLD:
+                # Create a finding ID
+                finding_id = f"EXFIL-{next_id}"
+                next_id += 1
+                
+                # Calculate flow duration and rate
+                duration = flow['last_time'] - flow['start_time']
+                rate_bytes_per_sec = flow['bytes_out'] / duration if duration > 0 else flow['bytes_out']
+                
+                # Determine severity based on volume
+                severity = 'low'
+                if flow['bytes_out'] > VOLUME_THRESHOLD * 10:  # 10MB+
+                    severity = 'high'
+                elif flow['bytes_out'] > VOLUME_THRESHOLD * 5:  # 5MB+
+                    severity = 'medium'
+                
+                # Create a meaningful summary
+                summary = f"Large data transfer: {flow['bytes_out'] / 1000000:.2f} MB sent from {flow['src_ip']} to {flow['dst_ip']}"
+                
+                # Construct detailed description
+                description = f"Detected a large outbound data transfer of {flow['bytes_out'] / 1000000:.2f} MB from {flow['src_ip']} to {flow['dst_ip']}:{flow['dst_port']} using {flow['protocol']}."
+                description += f"\n\nThe transfer occurred over {duration:.2f} seconds at a rate of {rate_bytes_per_sec / 1000:.2f} KB/s."
+                
+                # Technical details
+                technical_details = f"Data Flow Details:\n"
+                technical_details += f"- Source IP: {flow['src_ip']}\n"
+                technical_details += f"- Source Port: {flow['src_port']}\n"
+                technical_details += f"- Destination IP: {flow['dst_ip']}\n"
+                technical_details += f"- Destination Port: {flow['dst_port']}\n"
+                technical_details += f"- Protocol: {flow['protocol']}\n"
+                technical_details += f"- Total Bytes Sent: {flow['bytes_out']} ({flow['bytes_out'] / 1000000:.2f} MB)\n"
+                technical_details += f"- Duration: {duration:.2f} seconds\n"
+                technical_details += f"- Rate: {rate_bytes_per_sec / 1000:.2f} KB/s\n"
+                technical_details += f"- Packet Count: {flow['packet_count']}\n"
+                
+                # Recommendations
+                recommendations = [
+                    "Investigate the source system to identify what application is sending this data.",
+                    "Review the destination to ensure it is a legitimate service or destination.",
+                    "If this is not an expected data transfer, isolate the source system for further analysis.",
+                    "Consider implementing data loss prevention (DLP) controls to monitor and restrict large outbound transfers."
+                ]
+                
+                # References
+                references = [
+                    {
+                        "title": "MITRE ATT&CK: Exfiltration Over Other Network Medium (T1011)",
+                        "url": "https://attack.mitre.org/techniques/T1011/"
+                    },
+                    {
+                        "title": "Data Exfiltration Detection and Prevention",
+                        "url": "https://www.sans.org/reading-room/whitepapers/detection/detecting-preventing-data-exfiltration-unauthorized-data-copying-35447"
+                    }
+                ]
+                
+                # Create the finding
+                finding = {
+                    'id': finding_id,
+                    'timestamp': timestamp,
+                    'severity': severity,
+                    'type': 'Potential Data Exfiltration',
+                    'summary': summary,
+                    'description': description,
+                    'technical_details': technical_details,
+                    'recommendations': recommendations,
+                    'affected_packets': flow['packets'],
+                    'related_ips': [flow['src_ip'], flow['dst_ip']],
+                    'references': references
+                }
+                
+                findings.append(finding)
+        
+        # Check for ICMP tunneling (simplified)
+        for src_ip, data in icmp_data.items():
+            if data['total_bytes'] > ICMP_DATA_THRESHOLD:
+                finding_id = f"EXFIL-ICMP-{next_id}"
+                next_id += 1
+                
+                severity = 'medium'
+                
+                finding = {
+                    'id': finding_id,
+                    'timestamp': timestamp,
+                    'severity': severity,
+                    'type': 'ICMP Tunneling',
+                    'summary': f"Potential ICMP tunneling detected from {src_ip}",
+                    'description': f"Detected abnormal amount of ICMP data ({data['total_bytes']} bytes) from {src_ip}.",
+                    'technical_details': f"Source IP: {src_ip}\nICMP data bytes: {data['total_bytes']}\nPacket count: {len(data['packets'])}",
+                    'recommendations': [
+                        "Investigate the source system for signs of compromise.",
+                        "Consider restricting ICMP traffic if not required."
+                    ],
+                    'affected_packets': data['packets'],
+                    'related_ips': [src_ip],
+                    'references': [
+                        {
+                            "title": "ICMP Tunneling Techniques",
+                            "url": "https://attack.mitre.org/techniques/T1048/"
+                        }
+                    ]
+                }
+                
+                findings.append(finding)
+        
+        return next_id
+
+    def _detect_brute_force(self, packets, findings, next_id, timestamp):
+        """Detect potential brute force password attacks"""
+        try:
+            # Track authentication attempts by source/destination/service
+            auth_attempts = {}
+            
+            # Common authentication service ports
+            auth_services = {
+                '22': 'SSH',
+                '23': 'Telnet',
+                '3389': 'RDP',
+                '21': 'FTP',
+                '25': 'SMTP',
+                '110': 'POP3',
+                '143': 'IMAP',
+                '445': 'SMB',
+                '1433': 'MSSQL',
+                '3306': 'MySQL',
+                '5432': 'PostgreSQL',
+                '5900': 'VNC'
+            }
+            
+            # Analyze packets for potential authentication attempts
+            for packet in packets:
+                protocol = packet.get('protocol', '').upper()
+                src_ip = packet.get('src_ip', 'Unknown')
+                dst_ip = packet.get('dst_ip', 'Unknown')
+                dst_port = packet.get('dst_port', 'Unknown')
+                tcp_flags = packet.get('tcp_flags', '')
+                
+                # Skip if essential fields are missing
+                if src_ip == 'Unknown' or dst_ip == 'Unknown' or dst_port == 'Unknown':
+                    continue
+                
+                # Skip non-TCP packets for most services (could add UDP for some)
+                if protocol != 'TCP':
+                    continue
+                
+                # Check if this is a known authentication service
+                if dst_port in auth_services:
+                    service = auth_services[dst_port]
+                    
+                    # Create key for this src-dst-service combo
+                    key = f"{src_ip}_{dst_ip}_{dst_port}"
+                    
+                    # Initialize tracking for this key
+                    if key not in auth_attempts:
+                        auth_attempts[key] = {
+                            'src_ip': src_ip,
+                            'dst_ip': dst_ip,
+                            'dst_port': dst_port,
+                            'service': service,
+                            'syn_count': 0,
+                            'packet_ids': set(),
+                            'connection_attempts': 0
+                        }
+                    
+                    # Count SYN packets as potential new connection attempts
+                    if 'SYN' in tcp_flags and 'ACK' not in tcp_flags:
+                        auth_attempts[key]['syn_count'] += 1
+                        auth_attempts[key]['connection_attempts'] += 1
+                    
+                    # Count certain packet size combinations for intelligent guessing
+                    # This is a simplification - real detection would be protocol-specific
+                    auth_attempts[key]['packet_ids'].add(packet['id'])
+            
+            # Define thresholds for brute force detection
+            # These would ideally be configurable
+            connection_threshold = {
+                'SSH': 10,
+                'Telnet': 10,
+                'RDP': 10,
+                'FTP': 15,
+                'SMTP': 20,
+                'POP3': 15,
+                'IMAP': 15,
+                'SMB': 10,
+                'MSSQL': 10,
+                'MySQL': 10,
+                'PostgreSQL': 10,
+                'VNC': 10,
+                'default': 15
+            }
+            
+            # Check for potential brute force attacks
+            for key, data in auth_attempts.items():
+                service = data['service']
+                threshold = connection_threshold.get(service, connection_threshold['default'])
+                
+                # Check if connection attempts exceed threshold
+                if data['connection_attempts'] >= threshold:
+                    finding = {
+                        'id': next_id,
+                        'timestamp': timestamp,
+                        'severity': 'high',
+                        'type': 'Potential Brute Force',
+                        'summary': f"Potential {service} brute force from {data['src_ip']}",
+                        'description': (f"Detected {data['connection_attempts']} connection attempts "
+                                      f"from {data['src_ip']} to {service} service on {data['dst_ip']}. "
+                                      f"This pattern is consistent with a brute force password attack."),
+                        'technical_details': (f"Source IP: {data['src_ip']}\n"
+                                           f"Target IP: {data['dst_ip']}\n"
+                                           f"Target Port: {data['dst_port']} ({service})\n"
+                                           f"Connection Attempts: {data['connection_attempts']}\n"
+                                           f"SYN Packets: {data['syn_count']}"),
+                        'affected_packets': list(data['packet_ids'])[:100] + (['...'] if len(data['packet_ids']) > 100 else []),
+                        'related_ips': [data['src_ip'], data['dst_ip']],
+                        'recommendations': [
+                            f"Temporarily block {data['src_ip']} at your firewall.",
+                            f"Check {service} logs on {data['dst_ip']} for failed login attempts.",
+                            "Implement account lockout policies if not already in place.",
+                            "Consider rate limiting authentication attempts.",
+                            "Implement multi-factor authentication if possible."
+                        ],
+                        'references': [
+                            {'title': 'MITRE ATT&CK - Brute Force', 'url': 'https://attack.mitre.org/techniques/T1110/'},
+                            {'title': 'Password Attack Prevention', 'url': 'https://www.sans.org/security-resources/passwords'}
+                        ]
+                    }
+                    findings.append(finding)
+                    next_id += 1
+            
+            return findings
+            
+        except Exception as e:
+            if self.debug_mode:
+                self._log_debug(f"Error in brute force detection: {str(e)}")
+                import traceback
+                self._log_debug(traceback.format_exc())
+            return findings
+
+    def perform_security_analysis(self):
+        """
+        Main function to orchestrate security analysis on captured packets.
+        Returns a list of security findings.
+        """
+        self._log_debug("Starting security analysis")
+        
+        # Initialize findings list
+        findings = []
+        
+        # Create a timestamp for the analysis
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Initialize finding ID counter
+        next_id = 1
+        
+        try:
+            # Make sure we have packets to analyze
+            if not self.packets:
+                self._log_debug("No packets to analyze")
+                return []
+                
+            self._log_debug(f"Analyzing {len(self.packets)} packets")
+            
+            # Execute various detection modules
+            self._log_debug("Running port scan detection")
+            next_id = self._detect_port_scans(self.packets, findings, next_id, timestamp)
+            self._log_debug(f"After port scan detection: {len(findings)} findings")
+            
+            self._log_debug("Running suspicious flags detection")
+            next_id = self._detect_suspicious_flags(self.packets, findings, next_id, timestamp)
+            self._log_debug(f"After suspicious flags detection: {len(findings)} findings")
+            
+            self._log_debug("Running malware communication detection")
+            next_id = self._detect_malware_communication(self.packets, findings, next_id, timestamp)
+            self._log_debug(f"After malware communication detection: {len(findings)} findings")
+            
+            self._log_debug("Running data exfiltration detection")
+            next_id = self._detect_data_exfiltration(self.packets, findings, next_id, timestamp)
+            self._log_debug(f"After data exfiltration detection: {len(findings)} findings")
+            
+            self._log_debug("Running brute force detection")
+            next_id = self._detect_brute_force(self.packets, findings, next_id, timestamp)
+            self._log_debug(f"After brute force detection: {len(findings)} findings")
+            
+            # Sort findings by severity
+            severity_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3, 'info': 4}
+            findings.sort(key=lambda x: severity_order.get(x.get('severity', 'info').lower(), 5))
+            
+            # Generate a test finding if no findings were detected
+            if not findings and self.debug_mode:
+                self._log_debug("No findings detected, generating a test finding")
+                test_finding = {
+                    'id': f"TEST-1",
+                    'timestamp': timestamp,
+                    'severity': 'medium',
+                    'type': 'Test Finding',
+                    'summary': "Test security finding",
+                    'description': "This is a test security finding to verify the dashboard is working correctly.",
+                    'technical_details': "No technical details for test finding",
+                    'recommendations': ["This is just a test", "No real actions needed"],
+                    'affected_packets': [],
+                    'related_ips': []
+                }
+                findings.append(test_finding)
+            
+            self._log_debug(f"Security analysis complete. Found {len(findings)} issues.")
+            
+            return findings
+            
+        except Exception as e:
+            self._log_debug(f"Error in security analysis: {str(e)}")
+            import traceback
+            self._log_debug(traceback.format_exc())
+            
+            # Create an error finding
+            error_finding = {
+                'id': f"ERROR-{next_id}",
+                'timestamp': timestamp,
+                'severity': 'info',
+                'type': 'Analysis Error',
+                'summary': f"Error during security analysis: {str(e)}",
+                'description': f"An error occurred during the security analysis process. Some results may be incomplete.\n\nError details: {str(e)}",
+                'technical_details': traceback.format_exc(),
+                'recommendations': [
+                    "Check the application logs for more details.",
+                    "Ensure the packets were captured correctly.",
+                    "Try analyzing a smaller subset of packets if the dataset is large."
+                ],
+                'affected_packets': [],
+                'related_ips': []
+            }
+            
+            findings.append(error_finding)
+            return findings
+    
+    def _generate_security_summary(self, findings):
+        """
+        Generate a summary of security findings for dashboard display
+        """
+        self._log_debug("Generating security summary")
+        
+        # Initialize summary data
+        summary = {
+            'total_findings': len(findings),
+            'severity_counts': {
+                'critical': 0,
+                'high': 0,
+                'medium': 0,
+                'low': 0,
+                'info': 0
+            },
+            'finding_types': {},
+            'affected_ips': set(),
+            'highest_severity': 'info'
+        }
+        
+        # Severity ranking for determining highest severity
+        severity_rank = {
+            'critical': 4,
+            'high': 3,
+            'medium': 2,
+            'low': 1,
+            'info': 0
+        }
+        
+        highest_severity_rank = -1
+        
+        # Process each finding
+        for finding in findings:
+            # Count by severity
+            severity = finding.get('severity', 'info').lower()
+            summary['severity_counts'][severity] += 1
+            
+            # Update highest severity
+            current_rank = severity_rank.get(severity, 0)
+            if current_rank > highest_severity_rank:
+                highest_severity_rank = current_rank
+                summary['highest_severity'] = severity
+            
+            # Count by type
+            finding_type = finding.get('type', 'Unknown')
+            if finding_type not in summary['finding_types']:
+                summary['finding_types'][finding_type] = 0
+            summary['finding_types'][finding_type] += 1
+            
+            # Collect affected IPs
+            if 'related_ips' in finding:
+                for ip in finding['related_ips']:
+                    summary['affected_ips'].add(ip)
+        
+        # Convert sets to lists for easier handling
+        # (This will be done during export to avoid modifying the original data)
+        
+        return summary
+
+    def _ip_in_subnet(self, ip, subnet):
+        """Check if an IP address is within a CIDR subnet"""
+        # Simple string-based prefix check for demonstration
+        # A proper implementation would use ipaddress module
+        net_parts = subnet.split('/')
+        net_prefix = net_parts[0].rsplit('.', 1)[0]  # Get network prefix
+        
+        return ip.startswith(net_prefix)
 
 if __name__ == "__main__":
     root = tk.Tk()
