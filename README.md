@@ -91,7 +91,7 @@ python sus-gen.py [interface] [duration]
 - Packet filtering capabilities
 - CSV output format
 
-### Traffic Analysis
+### Traffic Analytics
 
 - Protocol distribution statistics
 - Top source and destination IP addresses
