@@ -60,7 +60,6 @@ def capture_packets(duration=5):
             return True
     
     print(f"Capturing packets for {duration} seconds...")
-    # Redirect Scapy's output to prevent the False values
     import sys, os
     with open(os.devnull, 'w') as f:
         old_stdout = sys.stdout

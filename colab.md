@@ -31,9 +31,9 @@ from scapy.all import sniff, Ether, IP, TCP, UDP
 import csv, datetime, time
 ```
 - This line imports three standard Python modules:
-  - `csv`: Used for reading and writing CSV files (line 151 and 154)
-  - `datetime`: Used to get current time for packet timestamps (line 47)
-  - `time`: Used to measure elapsed time during packet capture (lines 105, 113, 119)
+  - `csv`: Used for reading and writing CSV files
+  - `datetime`: Used to get current time for packet timestamps
+  - `time`: Used to measure elapsed time during packet capture
 
 ### Constants
 
@@ -53,7 +53,6 @@ TCP_FLAGS = {
   - 'U' maps to 'URG' (marks data as urgent)
   - 'E' maps to 'ECE' (indicates ECN-Echo, related to network congestion)
   - 'C' maps to 'CWR' (indicates Congestion Window Reduced)
-- This dictionary is used on line 74 to convert flag codes to their full names
 
 ```python
 COLUMNS = ["#", "Time", "Source MAC", "Destination MAC", "Source IP", "Destination IP", 
@@ -62,16 +61,14 @@ COLUMNS = ["#", "Time", "Source MAC", "Destination MAC", "Source IP", "Destinati
 ```
 - This creates a list named `COLUMNS` that defines the order and names of columns in the CSV output
 - Each string in the list represents one column header
-- This list is used in:
-  - Line 46: as a reference for initializing the dictionary keys
-  - Line 153: to provide column names to the CSV DictWriter
+- Used for initializing dictionary keys and providing column names to the CSV DictWriter
 
 ## Packet Processing
 
 ```python
 def process_packet(pkt, pkt_num):
 ```
-- This line defines a function named `process_packet` that takes two parameters:
+- Defines a function named `process_packet` that takes two parameters:
   - `pkt`: A Scapy packet object that contains all the captured packet data
   - `pkt_num`: An integer representing the packet's sequential number
 
@@ -134,11 +131,6 @@ def process_packet(pkt, pkt_num):
 - These will only be populated if the packet contains TCP or UDP data
 
 ```python
-    }
-```
-- Closes the dictionary initialization
-
-```python
     if TCP in pkt:
 ```
 - Checks if the packet contains TCP data by testing if the TCP layer is present
@@ -199,15 +191,9 @@ def process_packet(pkt, pkt_num):
   - If not, sets an empty string
 
 ```python
-        })
-```
-- Closes the dictionary update
-
-```python
     return row
 ```
 - Returns the completed row dictionary containing all the extracted packet information
-- This dictionary will be added to the packets list (line 117)
 
 ## Packet Capture
 
@@ -322,7 +308,6 @@ def capture_packets(duration=5):
     return packets
 ```
 - Returns the list of processed packet dictionaries
-- This list will be used by save_csv() (line 173)
 
 ## CSV Output
 
