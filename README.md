@@ -89,6 +89,7 @@ Key components:
 - Processes captured packets in real-time to extract detailed information.
 - Supports a wide range of protocols including Ether, IP, TCP, UDP, HTTP, DNS, ICMP, ARP, DHCP, SNMP, and TLS.
 - Extracts protocol-specific fields (e.g., HTTP method/host, DNS query/answer, ICMP type/code, ARP opcodes, DHCP message types, SNMP details, TLS handshake info).
+- It leverages Scapy for its powerful packet dissection capabilities, which simplifies the extraction of detailed protocol information compared to lower-level approaches like raw sockets that would require manual parsing of packet headers.
 - Saves the processed packet data into a CSV file for further analysis.
 - Useful for network monitoring, basic traffic analysis, and educational purposes.
 - Includes functionality to suppress Scapy's default output during capture for a cleaner user experience.

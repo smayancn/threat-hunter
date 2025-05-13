@@ -118,6 +118,9 @@ This document provides a detailed line-by-line explanation of the `colab.py` scr
 
 The `colab.py` script is a command-line tool that uses the Scapy library to capture network packets from a network interface. It inspects each packet to identify its protocol (Ethernet, IP, TCP, UDP, HTTP, TLS, DNS, DHCP, SNMP, ICMP, ARP) and extracts key information. This information is then compiled into a structured format and saved as a CSV file, which can be used for network monitoring, basic traffic analysis, or educational purposes.
 
+### Choice of Scapy over Raw Sockets
+The `colab.py` script utilizes Scapy for packet capture and analysis. While raw sockets offer a more fundamental way to access network packets, Scapy was chosen for its comprehensive capabilities in dissecting, interpreting, and manipulating packets across various protocols. This higher-level abstraction significantly simplifies the development of protocol-specific parameter extraction, which is a core feature of `colab.py`, allowing for more rapid development and easier maintenance compared to the intricate and verbose code often required when working directly with raw sockets for similar tasks. Raw sockets would necessitate manual parsing of packet headers for each protocol, a complex undertaking that Scapy handles internally.
+
 ## 2. Imports
 
 ```python
