@@ -7,7 +7,7 @@ A comprehensive network packet capture and analysis toolkit designed for threat 
 ### Packet Capture & Analysis
 - Multiple capture methods (Scapy, raw sockets, tcpdump)
 - Real-time packet processing and analysis
-- Support for various network protocols (TCP, UDP, ICMP, HTTP, DNS)
+- Support for various network protocols (TCP, UDP, ICMP, HTTP, DNS, ARP, DHCP, SNMP, TLS)
 - Packet filtering and sorting capabilities
 - Detailed packet inspection and decoding
 
@@ -76,16 +76,22 @@ Graphical user interface with features:
 - Protocol-based coloring
 - Interactive charts
 - Dark/light theme support
+- CSV import/export
 
 Key components:
 - Packet list view with sorting
 - Detailed packet inspection
 - Protocol distribution charts
 - Search and filter capabilities
-- CSV import/export
 
 #### `colab.py`
-code for weekly interaction demo
+- A Python script designed for capturing network packets using Scapy.
+- Processes captured packets in real-time to extract detailed information.
+- Supports a wide range of protocols including Ether, IP, TCP, UDP, HTTP, DNS, ICMP, ARP, DHCP, SNMP, and TLS.
+- Extracts protocol-specific fields (e.g., HTTP method/host, DNS query/answer, ICMP type/code, ARP opcodes, DHCP message types, SNMP details, TLS handshake info).
+- Saves the processed packet data into a CSV file for further analysis.
+- Useful for network monitoring, basic traffic analysis, and educational purposes.
+- Includes functionality to suppress Scapy's default output during capture for a cleaner user experience.
 
 #### `sus-gen.py`
 Suspicious traffic generator for testing with features:
