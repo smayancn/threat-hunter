@@ -1,3 +1,19 @@
+## Features and Functionality Summary
+
+The `colab.py` script is a network packet sniffer with the following key features:
+
+*   **Interactive Interface Selection**: Prompts the user to choose a network interface for capturing packets from a list of available interfaces with their details.
+*   **User-Defined Capture Duration**: Allows the user to specify the duration for which packets should be captured.
+*   **Multi-Protocol Analysis**: Captures and analyzes packets for a wide range of protocols including Ethernet, IP, TCP, UDP, HTTP, TLS/SSL, DNS, DHCP, SNMP, ICMP, and ARP.
+*   **Detailed Parameter Extraction**: For each supported protocol, it extracts relevant parameters such as source/destination MAC/IP addresses, ports, TCP flags, HTTP methods/paths, DNS query details, TLS handshake types, etc.
+*   **Heuristic Protocol Detection**: Includes basic heuristics to identify HTTP traffic even when not explicitly dissected by Scapy (e.g., in raw TCP payloads), and distinguishes it from TLS traffic on common ports.
+*   **CSV Output**: Saves the captured and processed packet information into a structured CSV file (`network_logs.csv` by default) for easy analysis and review.
+*   **Error Handling & User Feedback**: Provides user-friendly prompts, handles invalid inputs for duration, and informs the user about the capture process and saving results.
+*   **Scapy-Based**: Leverages the Scapy library for powerful packet manipulation and dissection, simplifying the process of handling complex network protocols.
+*   **Output Suppression**: Suppresses Scapy's default console output during sniffing for a cleaner user experience, only showing essential script-generated messages.
+
+This tool is designed for network monitoring, basic traffic analysis, and educational purposes, providing a detailed yet accessible way to inspect network communications.
+
 ## Protocol-Specific Parameters Extracted
 
 This section details the unique parameters extracted for various network protocols by the `colab.py` script and provides a brief explanation of their meaning.
@@ -128,7 +144,7 @@ from scapy.all import sniff, Ether, IP, TCP, UDP, DNS, ICMP, ARP, Raw
 from scapy.layers.http import HTTP
 from scapy.layers.dhcp import DHCP
 from scapy.layers.snmp import SNMP
-from scapy.layers.tls.all import TLS # For TLS record layer, specific handshake messages might need more specific imports
+from scapy.layers.tls.all import TLS 
 import csv, datetime, time
 ```
 -   `from scapy.all import sniff, Ether, IP, TCP, UDP, DNS, ICMP, ARP, Raw`: Imports core components from Scapy, a powerful packet manipulation library.
@@ -146,6 +162,8 @@ import csv, datetime, time
 
 These constants are defined at the module level for use throughout the script.
 
+
+       
 ### TCP_FLAGS
 ```python
 TCP_FLAGS = {

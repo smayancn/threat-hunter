@@ -1,8 +1,8 @@
-from scapy.all import sniff, Ether, IP, TCP, UDP, DNS, ICMP, ARP, Raw
+from scapy.all import sniff, Ether, IP, TCP, UDP, DNS, ICMP, ARP, Raw, conf, get_working_ifaces
 from scapy.layers.http import HTTP
 from scapy.layers.dhcp import DHCP
 from scapy.layers.snmp import SNMP
-from scapy.layers.tls.all import TLS # For TLS record layer, specific handshake messages might need more specific imports
+from scapy.layers.tls.all import TLS 
 import csv, datetime, time
 
 TCP_FLAGS = {
@@ -27,6 +27,45 @@ TLS_PORTS = {443, 8443}
 DNS_PORTS = {53}
 DHCP_PORTS = {67, 68}
 SNMP_PORTS = {161, 162}
+
+def select_interface():
+    """
+    Display available network interfaces and let user select one.
+    Returns the name of the selected interface.
+    """
+    print("\nAvailable Network Interfaces:")
+    print("-" * 60)
+    print(f"{'Index':<6} {'Name':<15} {'IP Address':<15} {'Description'}")
+    print("-" * 60)
+    
+    # Get list of working interfaces
+    interfaces = get_working_ifaces()
+    valid_interfaces = []
+    
+    for idx, iface in enumerate(interfaces, 1):
+        name = iface.name
+        # Get IP address if available
+        ip = iface.ip if hasattr(iface, 'ip') else 'No IP'
+        # Get description or use interface name if not available
+        description = getattr(iface, 'description', name)
+        
+        print(f"{idx:<6} {name:<15} {ip:<15} {description}")
+        valid_interfaces.append(name)
+    
+    print("-" * 60)
+    
+    while True:
+        try:
+            choice = input("\nSelect interface by number [1]: ").strip() or "1"
+            idx = int(choice) - 1
+            if 0 <= idx < len(valid_interfaces):
+                selected = valid_interfaces[idx]
+                print(f"\nSelected interface: {selected}")
+                return selected
+            else:
+                print("Invalid selection. Please try again.")
+        except ValueError:
+            print("Please enter a valid number.")
 
 def _safe_decode(data, encoding='utf-8', errors='ignore'):
     if isinstance(data, bytes):
@@ -186,6 +225,9 @@ def capture_packets(duration=5):
     stop_time = time.time() + duration
     pkt_count = 1
     
+    # Select interface before starting capture
+    iface = select_interface()
+    
     def packet_callback(pkt):
         nonlocal pkt_count
         packets.append(process_packet(pkt, pkt_count))
@@ -193,13 +235,13 @@ def capture_packets(duration=5):
         if time.time() >= stop_time:
             return True
     
-    print(f"Capturing packets for {duration} seconds...")
+    print(f"\nCapturing packets on interface {iface} for {duration} seconds...")
     import sys, os
     with open(os.devnull, 'w') as f:
         old_stdout = sys.stdout
         sys.stdout = f
         try:
-            sniff(prn=packet_callback, store=0, timeout=duration)
+            sniff(iface=iface, prn=packet_callback, store=0, timeout=duration)
         finally:
             sys.stdout = old_stdout
     return packets
@@ -215,6 +257,19 @@ def save_csv(packets, filename="network_logs.csv"):
     print(f"Saved {len(packets)} packets to {filename}")
 
 if __name__ == "__main__":
-    duration = int(input("Enter capture duration in seconds [default: 5]: ") or 5)
+    while True:
+        try:
+            duration_input = input("\nEnter capture duration in seconds [default: 5]: ").strip()
+            if not duration_input:  # If empty, use default
+                duration = 5
+                break
+            duration = int(duration_input)
+            if duration <= 0:
+                print("Duration must be a positive number.")
+                continue
+            break
+        except ValueError:
+            print("Please enter a valid number.")
+    
     packets = capture_packets(duration)
     save_csv(packets)
