@@ -1,4 +1,4 @@
-# 🛡️ Threat Hunter - Complete Network Security Toolkit
+# 🛡️ FlowInspect: Real-Time Packet Analysis Framework
 
 A comprehensive network packet capture and analysis toolkit designed for threat detection, network monitoring, and security analysis with advanced machine learning capabilities.
 
