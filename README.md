@@ -1,4 +1,4 @@
-# 🛡️ Network Packet Analysis & ML Preprocessing Pipeline
+# Network Packet Analysis & ML Preprocessing Pipeline
 
 A focused network packet capture and preprocessing toolkit designed for machine learning-based threat detection. This project demonstrates how detailed packet analysis combined with feature engineering significantly improves ML model performance for network security applications.
 
